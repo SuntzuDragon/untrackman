@@ -1,0 +1,12 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.DS_Store
+
+# never commit credentials
+.token
+.tokens.json
+*.token
+
+# local API response dumps
+raw/
