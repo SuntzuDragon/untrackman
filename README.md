@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/SuntzuDragon/untrackman/actions/workflows/ci.yml/badge.svg)](https://github.com/SuntzuDragon/untrackman/actions/workflows/ci.yml)
 [![deploy](https://img.shields.io/github/checks-status/SuntzuDragon/untrackman/main?label=deploy)](https://github.com/SuntzuDragon/untrackman/commits/main)
-[![live](https://img.shields.io/badge/live-untrackman.imcb01.workers.dev-f38020?logo=cloudflare&logoColor=white)](https://untrackman.imcb01.workers.dev)
+[![live](https://img.shields.io/badge/live-golf.imcb.dev-f38020?logo=cloudflare&logoColor=white)](https://golf.imcb.dev)
 
 Your Trackman Range shot data, extracted and analysed across sessions.
 
@@ -32,9 +32,14 @@ pnpm test          # regression tests against real validated shots
 pnpm deploy        # build + push to Cloudflare Workers
 ```
 
-Hosted on Cloudflare Workers Static Assets (`wrangler.jsonc`). There is no
-`main` entry, so no Worker code runs — it is purely static files on a CDN.
-Adding a `main` later would make it full-stack without changing hosts.
+Live at **https://golf.imcb.dev**, on Cloudflare Workers Static Assets
+(`wrangler.jsonc`). There is no `main` entry, so no Worker code runs — it is
+purely static files on a CDN. Adding a `main` later would make it full-stack
+without changing hosts or DNS.
+
+Pushes to `main` build and deploy automatically. CI runs typecheck, the
+regression suite, and the build; Cloudflare's own build only does typecheck and
+bundle, which is why the tests run separately.
 
 Sign in with the QR code, hit **Sync**, done.
 
