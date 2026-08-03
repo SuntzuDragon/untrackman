@@ -1,5 +1,9 @@
 # untrackman
 
+[![CI](https://github.com/SuntzuDragon/untrackman/actions/workflows/ci.yml/badge.svg)](https://github.com/SuntzuDragon/untrackman/actions/workflows/ci.yml)
+[![deploy](https://img.shields.io/github/checks-status/SuntzuDragon/untrackman/main?label=deploy)](https://github.com/SuntzuDragon/untrackman/commits/main)
+[![live](https://img.shields.io/badge/live-untrackman.imcb01.workers.dev-f38020?logo=cloudflare&logoColor=white)](https://untrackman.imcb01.workers.dev)
+
 Your Trackman Range shot data, extracted and analysed across sessions.
 
 The TrackMan consumer app has no export, and the web portal walls per-shot detail

@@ -1,0 +1,34 @@
+name: CI
+
+# Cloudflare's build only runs `tsc -b && vite build`, so the regression suite
+# never executes there — a broken test would deploy happily. This runs it.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm exec tsc -b --noEmit
+
+      - name: Tests
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
