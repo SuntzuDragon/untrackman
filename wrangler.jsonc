@@ -1,0 +1,22 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "untrackman",
+  "compatibility_date": "2026-08-03",
+
+  // Static assets only — there is deliberately no "main" entry, so no Worker
+  // script runs and no server-side code exists. Asset requests don't count
+  // against Workers request billing.
+  //
+  // If a backend is ever wanted (token custody, scheduled sync), add a "main"
+  // pointing at a Worker and it becomes full-stack without moving hosts.
+  "assets": {
+    "directory": "./dist",
+    // The app is a single page; tab state lives in memory, not the URL. This
+    // makes any unmatched path serve index.html rather than a 404.
+    "not_found_handling": "single-page-application"
+  },
+
+  "observability": {
+    "enabled": true
+  }
+}

@@ -25,7 +25,12 @@ pnpm install
 pnpm dev           # http://localhost:5173
 pnpm build         # -> dist/, deploy anywhere static
 pnpm test          # regression tests against real validated shots
+pnpm deploy        # build + push to Cloudflare Workers
 ```
+
+Hosted on Cloudflare Workers Static Assets (`wrangler.jsonc`). There is no
+`main` entry, so no Worker code runs — it is purely static files on a CDN.
+Adding a `main` later would make it full-stack without changing hosts.
 
 Sign in with the QR code, hit **Sync**, done.
 
