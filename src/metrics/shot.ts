@@ -8,6 +8,7 @@
 import { clubConfig } from './clubs';
 import { M_TO_FT, M_TO_YD, MS_TO_MPH } from './units';
 import { applyBayOffset, offsetKey, type BayOffset } from './bays';
+import { carryEfficiency, type CarryModel } from './ballistics';
 import type { RangeStroke, RangeStrokeMeasurement } from '../api/types';
 
 /**
@@ -51,7 +52,12 @@ export type ShotQuality = 'good' | 'mishit' | 'unknown';
 export interface Shot {
   id: string;
   sessionId: string;
+  /** Timestamp of this stroke. Distinct from sessionTime — needed for fatigue. */
   time: string;
+  /** Start of the session this belongs to. Use for grouping and trends. */
+  sessionTime: string;
+  /** 1-based position of this shot within its session, ordered by time. */
+  shotIndex: number;
   club: string | null;
   bayName: string | null;
 
@@ -105,6 +111,14 @@ export interface Shot {
    * comparison that actually carries information.
    */
   loftDeltaVsOwn: number | null;
+
+  /** Carry the launch conditions should have produced, yards. */
+  expectedCarryYd: number | null;
+  /**
+   * Actual carry over expected. ~1.0 is normal; well under 1 means the ball had
+   * the speed and angle of a good shot but did not fly like one.
+   */
+  carryEfficiency: number | null;
 
   quality: ShotQuality;
   qualityReason: string | null;
@@ -165,6 +179,7 @@ export function curvature(m: RangeStrokeMeasurement): {
 export function classify(
   m: RangeStrokeMeasurement,
   refBallMph: number | null,
+  model?: CarryModel | null,
 ): { quality: ShotQuality; reason: string | null } {
   const ball = m.ballSpeed == null ? null : m.ballSpeed * MS_TO_MPH;
   if (ball == null || refBallMph == null) return { quality: 'unknown', reason: null };
@@ -175,6 +190,17 @@ export function classify(
   // A near-zero launch angle with real ball speed is a top or a thin.
   if (m.launchAngle != null && m.launchAngle < 5 && ball > refBallMph * 0.6) {
     return { quality: 'mishit', reason: `launch ${m.launchAngle.toFixed(1)}° — topped/thinned` };
+  }
+  // Speed and angle both look fine but the ball did not go where that implies.
+  // This is the rule that catches glancing strikes the first two miss.
+  if (model) {
+    const { efficiency } = carryEfficiency(m, model);
+    if (efficiency != null && efficiency < 0.85) {
+      return {
+        quality: 'mishit',
+        reason: `carried ${(efficiency * 100).toFixed(0)}% of expected for these launch conditions`,
+      };
+    }
   }
   return { quality: 'good', reason: null };
 }
@@ -207,6 +233,7 @@ export function toShot(
   refSpeeds: Map<string, number>,
   bayOffsets?: Map<string, BayOffset>,
   loftBaselines?: Map<string, number>,
+  ctx?: { sessionTime?: string; shotIndex?: number; model?: CarryModel | null },
 ): Shot {
   // Merge per field: pro-ball is what the app shows, but it returns null for
   // landingAngle / ballSpinEffective / reducedAccuracy, which site populates.
@@ -218,6 +245,8 @@ export function toShot(
       id: stroke.dbId,
       sessionId,
       time: stroke.time,
+      sessionTime: ctx?.sessionTime ?? stroke.time,
+      shotIndex: ctx?.shotIndex ?? 0,
       club: stroke.club,
       bayName: stroke.bayName,
       carryYd: null, totalYd: null, carrySideFt: null, ballMph: null,
@@ -227,6 +256,7 @@ export function toShot(
       offlineFt: null,
       curveFt: null, curveDeg: null,
       estClubMph: null, loftDelta: null, loftDeltaVsOwn: null,
+      expectedCarryYd: null, carryEfficiency: null,
       quality: 'unknown', qualityReason: 'no measurement',
       isRawBall: false, accuracyFlags: [],
     };
@@ -235,7 +265,10 @@ export function toShot(
   const cfg = clubConfig(stroke.club);
   const ballMph = m.ballSpeed == null ? null : m.ballSpeed * MS_TO_MPH;
   const { ft: curveFt, deg: curveDeg } = curvature(m);
-  const { quality, reason } = classify(m, refSpeeds.get(stroke.club ?? '') ?? null);
+  const { quality, reason } = classify(
+    m, refSpeeds.get(stroke.club ?? '') ?? null, ctx?.model,
+  );
+  const eff = carryEfficiency(m, ctx?.model ?? null);
 
   const bay = bayOffsets?.get(offsetKey(stroke.bayName, stroke.targetId));
   const adj = applyBayOffset(m, bay?.offsetDeg);
@@ -249,6 +282,8 @@ export function toShot(
     id: stroke.dbId,
     sessionId,
     time: stroke.time,
+    sessionTime: ctx?.sessionTime ?? stroke.time,
+    shotIndex: ctx?.shotIndex ?? 0,
     club: stroke.club,
     bayName: stroke.bayName,
 
@@ -275,6 +310,8 @@ export function toShot(
     loftDelta,
     loftDeltaVsOwn:
       loftDelta != null && baseline != null ? loftDelta - baseline : null,
+    expectedCarryYd: eff.expectedYd,
+    carryEfficiency: eff.efficiency,
 
     quality,
     qualityReason: reason,

@@ -30,7 +30,7 @@ export interface ClubConfig {
   note?: string;
 }
 
-export const CLUBS: ClubConfig[] = [
+export const DEFAULT_BAG: ClubConfig[] = [
   {
     trackmanId: 'Driver',
     label: 'Driver',
@@ -137,10 +137,63 @@ export const MISSING_SLOTS = [
   },
 ];
 
-const BY_ID = new Map(CLUBS.map((c) => [c.trackmanId, c]));
+const STORAGE_KEY = 'untrackman.bag';
+
+/**
+ * The active bag.
+ *
+ * Held as module state rather than threaded through every call site: club
+ * lookup happens in a dozen places and passing a bag into each would be noise.
+ * `setBag` is called once on load and whenever the user edits, and React
+ * components include the bag in their memo dependencies so they recompute.
+ */
+let activeBag: ClubConfig[] = DEFAULT_BAG;
+let byId = new Map(activeBag.map((c) => [c.trackmanId, c]));
+
+export function getBag(): ClubConfig[] {
+  return activeBag;
+}
+
+export function setBag(clubs: ClubConfig[]): void {
+  activeBag = [...clubs].sort((a, b) => a.order - b.order);
+  byId = new Map(activeBag.map((c) => [c.trackmanId, c]));
+}
+
+export function loadBag(): ClubConfig[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return DEFAULT_BAG;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed) || !parsed.length) return DEFAULT_BAG;
+    // Tolerate partial rows from an older shape rather than throwing away the
+    // user's whole bag.
+    return parsed.map((c: Partial<ClubConfig>, i: number) => ({
+      trackmanId: String(c.trackmanId ?? `club-${i}`),
+      label: String(c.label ?? c.trackmanId ?? `Club ${i + 1}`),
+      model: String(c.model ?? ''),
+      loft: typeof c.loft === 'number' ? c.loft : null,
+      loftConfidence: (c.loftConfidence ?? 'assumed') as LoftConfidence,
+      order: typeof c.order === 'number' ? c.order : i,
+      assumedSmash: typeof c.assumedSmash === 'number' ? c.assumedSmash : null,
+      note: c.note,
+    }));
+  } catch {
+    return DEFAULT_BAG;
+  }
+}
+
+export function saveBag(clubs: ClubConfig[]): void {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(clubs));
+}
+
+export function resetBag(): ClubConfig[] {
+  localStorage.removeItem(STORAGE_KEY);
+  setBag(DEFAULT_BAG);
+  return DEFAULT_BAG;
+}
 
 export function clubConfig(trackmanId: string | null): ClubConfig | undefined {
-  return trackmanId ? BY_ID.get(trackmanId) : undefined;
+  return trackmanId ? byId.get(trackmanId) : undefined;
 }
 
 export function clubLabel(trackmanId: string | null): string {
@@ -150,3 +203,14 @@ export function clubLabel(trackmanId: string | null): string {
 export function clubOrder(trackmanId: string | null): number {
   return clubConfig(trackmanId)?.order ?? 99;
 }
+
+/**
+ * Known Trackman club identifiers, for the bag editor's dropdown. Trackman
+ * names these; a bag entry only matters if its id matches what the API reports.
+ */
+export const KNOWN_CLUB_IDS = [
+  'Driver', '3Wood', '5Wood', '7Wood',
+  '2Hybrid', '3Hybrid', '4Hybrid', '5Hybrid',
+  '1Iron', '2Iron', '3Iron', '4Iron', '5Iron', '6Iron', '7Iron', '8Iron', '9Iron',
+  'PitchingWedge', 'GapWedge', 'SandWedge', 'LobWedge', 'Putter',
+];

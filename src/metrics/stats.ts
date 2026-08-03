@@ -2,7 +2,7 @@
  * Aggregation: per-club distributions, gapping, and cross-session trends.
  */
 
-import { CLUBS, MISSING_SLOTS, clubConfig, clubLabel, clubOrder } from './clubs';
+import { getBag, MISSING_SLOTS, clubConfig, clubLabel, clubOrder } from './clubs';
 import type { Shot } from './shot';
 
 export const mean = (v: number[]): number | null =>
@@ -192,6 +192,17 @@ export interface ClubSessionStats {
   curveMean: number | null;
   offlineMean: number | null;
   launchMean: number | null;
+  /**
+   * Coefficient of variation of ball speed among clean strikes, as a fraction.
+   *
+   * More readable than mishit rate for clubs that only see a handful of shots a
+   * session: a rate over 5 shots moves in 20-point steps, while CV moves
+   * continuously and still means something.
+   */
+  ballCv: number | null;
+  carryCv: number | null;
+  /** Median carry as a fraction of expected — strike quality, continuous. */
+  carryEfficiencyMedian: number | null;
 }
 
 export interface SessionTrend {
@@ -218,6 +229,12 @@ function clubSession(pool: Shot[]): ClubSessionStats {
   const mishits = pool.filter((s) => s.quality === 'mishit');
   const carries = nums(good, 'carryYd').sort((a, b) => a - b);
   const speeds = nums(good, 'ballMph').sort((a, b) => a - b);
+  const effs = nums(good, 'carryEfficiency').sort((a, b) => a - b);
+  const cv = (v: number[]) => {
+    const m = mean(v);
+    const sd = stdev(v);
+    return m && sd != null && m !== 0 ? sd / m : null;
+  };
   return {
     shots: pool.length,
     clean: good.length,
@@ -229,6 +246,9 @@ function clubSession(pool: Shot[]): ClubSessionStats {
     curveMean: mean(nums(good, 'curveFt')),
     offlineMean: mean(nums(good, 'offlineFt')),
     launchMean: mean(nums(good, 'launchAngle')),
+    ballCv: cv(speeds),
+    carryCv: cv(carries),
+    carryEfficiencyMedian: quantile(effs, 0.5),
   };
 }
 
@@ -247,7 +267,7 @@ export function sessionTrends(shots: Shot[]): SessionTrend[] {
   for (const [sessionId, all] of bySession) {
     const mishits = all.filter((s) => s.quality === 'mishit');
     const byClub: Record<string, ClubSessionStats> = {};
-    for (const c of CLUBS) {
+    for (const c of getBag()) {
       const pool = all.filter((s) => s.club === c.trackmanId);
       if (pool.length) byClub[c.trackmanId] = clubSession(pool);
     }
@@ -318,7 +338,65 @@ export const TREND_METRICS: TrendMetric[] = [
     axisLabel: 'Launch (\u00b0)',
     get: (c) => c.launchMean,
   },
+  {
+    key: 'ballCv',
+    label: 'Speed consistency',
+    axisLabel: 'Ball speed variation (CV)',
+    get: (c) => c.ballCv,
+    percent: true,
+    lowerIsBetter: true,
+  },
+  {
+    key: 'carryEfficiencyMedian',
+    label: 'Strike quality',
+    axisLabel: 'Carry vs expected',
+    get: (c) => c.carryEfficiencyMedian,
+    percent: true,
+  },
 ];
+
+/**
+ * Shot quality against position within the session.
+ *
+ * Answers a question nothing else here does: how long is a session actually
+ * productive? Bins are shot ranges rather than minutes because balls hit is
+ * what fatigues you, and it pools across sessions so each bin has real weight.
+ */
+export interface FatigueBin {
+  label: string;
+  from: number;
+  to: number;
+  shots: number;
+  mishitRate: number | null;
+  ballMphMedian: number | null;
+  carryEfficiencyMedian: number | null;
+}
+
+export function fatigueCurve(shots: Shot[], binSize = 10): FatigueBin[] {
+  const maxIndex = shots.reduce((a, s) => Math.max(a, s.shotIndex), 0);
+  if (!maxIndex) return [];
+
+  const bins: FatigueBin[] = [];
+  for (let from = 1; from <= maxIndex; from += binSize) {
+    const to = from + binSize - 1;
+    const pool = shots.filter((s) => s.shotIndex >= from && s.shotIndex <= to);
+    if (!pool.length) continue;
+    const good = pool.filter((s) => s.quality === 'good');
+    const mishits = pool.filter((s) => s.quality === 'mishit');
+    const speeds = nums(good, 'ballMph').sort((a, b) => a - b);
+    const effs = nums(good, 'carryEfficiency').sort((a, b) => a - b);
+    bins.push({
+      label: `${from}\u2013${to}`,
+      from,
+      to,
+      shots: pool.length,
+      mishitRate: pool.length ? mishits.length / pool.length : null,
+      ballMphMedian: quantile(speeds, 0.5),
+      carryEfficiencyMedian: quantile(effs, 0.5),
+    });
+  }
+  return bins;
+}
 
 /**
  * Least-squares fit of a metric against time for one club.

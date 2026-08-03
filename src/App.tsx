@@ -9,13 +9,18 @@ import { toShot, referenceSpeeds, loftBaselines, type Shot } from './metrics/sho
 import { computeBayOffsets, makeCleanStrikePredicate, type BayOffset } from './metrics/bays';
 import {
   clubStats, gapping, sessionTrends, dispersionEllipse, toCsv,
-  TREND_METRICS, MIN_SHOTS_FOR_TREND, trendFit,
+  TREND_METRICS, MIN_SHOTS_FOR_TREND, trendFit, fatigueCurve,
 } from './metrics/stats';
 import { ClubFilter, loadClubFilter, saveClubFilter } from './ui/ClubFilter';
-import { CLUBS, MISSING_SLOTS, clubLabel, clubOrder } from './metrics/clubs';
+import {
+  MISSING_SLOTS, clubLabel, clubOrder, getBag, setBag, loadBag, saveBag, resetBag,
+  type ClubConfig,
+} from './metrics/clubs';
+import { BagEditor } from './ui/BagEditor';
+import { fitCarryModel } from './metrics/ballistics';
 import type { RangeStroke } from './api/types';
 
-type Tab = 'overview' | 'clubs' | 'gapping' | 'dispersion' | 'curve' | 'shots';
+type Tab = 'overview' | 'clubs' | 'gapping' | 'dispersion' | 'curve' | 'fatigue' | 'shots' | 'bag';
 
 const fmt = (v: number | null | undefined, dp = 1) =>
   v == null ? '—' : v.toFixed(dp);
@@ -40,6 +45,12 @@ export default function App() {
    */
   const [showHidden, setShowHidden] = useState(false);
   const [hiddenIds, setHiddenIds] = useState<Set<string>>(new Set());
+  const [bag, setBagState] = useState<ClubConfig[]>(() => {
+    const b = loadBag();
+    setBag(b);
+    return b;
+  });
+  const [modelInfo, setModelInfo] = useState<{ r2: number; n: number } | null>(null);
   const [metricKey, setMetricKey] = useState(TREND_METRICS[0].key);
 
   const reload = useCallback(async () => {
@@ -55,14 +66,42 @@ export default function App() {
     const offsets = computeBayOffsets(raws, makeCleanStrikePredicate(refs));
     const lofts = loftBaselines(raws, refs);
     setBays([...offsets.values()].sort((a, b) => a.offsetDeg - b.offsetDeg));
+
+    // Fit expected-carry on shots that already look well struck, so the model
+    // does not learn that a topped 6-iron is normal.
+    const wellStruck = makeCleanStrikePredicate(refs);
+    const trainingSet = raws
+      .filter((r) => {
+        const m = r.proBall ?? r.raw;
+        return !!m && wellStruck(m, r.club);
+      })
+      .map((r) => (r.proBall ?? r.raw)!);
+    const carryModel = fitCarryModel(trainingSet, () => true);
+    setModelInfo(carryModel ? { r2: carryModel.r2, n: carryModel.n } : null);
+
+    // Shot index within each session, ordered by stroke time.
+    const bySession = new Map<string, typeof strokeRows>();
+    for (const r of strokeRows) {
+      if (!bySession.has(r.sessionId)) bySession.set(r.sessionId, []);
+      bySession.get(r.sessionId)!.push(r);
+    }
+    const indexOf = new Map<string, number>();
+    for (const rows of bySession.values()) {
+      [...rows]
+        .sort((a, b) => a.time.localeCompare(b.time))
+        .forEach((r, i) => indexOf.set(r.id, i + 1));
+    }
+
     setShots(
-      strokeRows.map((r) => {
-        const shot = toShot(r.raw, r.sessionId, refs, offsets, lofts);
-        // Group by session date, not the individual stroke timestamp.
-        return { ...shot, time: sessionTime.get(r.sessionId) ?? shot.time };
-      }),
+      strokeRows.map((r) =>
+        toShot(r.raw, r.sessionId, refs, offsets, lofts, {
+          sessionTime: sessionTime.get(r.sessionId) ?? r.time,
+          shotIndex: indexOf.get(r.id) ?? 0,
+          model: carryModel,
+        }),
+      ),
     );
-  }, []);
+  }, [bag]);
 
   useEffect(() => {
     if (signedIn) reload();
@@ -91,7 +130,7 @@ export default function App() {
 
   const availableClubs = useMemo(() => {
     const seen = new Set(sessionScoped.map((s) => s.club).filter((c): c is string => !!c));
-    return CLUBS.map((c) => c.trackmanId).filter((c) => seen.has(c));
+    return getBag().map((c) => c.trackmanId).filter((c) => seen.has(c));
   }, [sessionScoped]);
 
   const shotCounts = useMemo(() => {
@@ -108,6 +147,12 @@ export default function App() {
     if (!clubFilter) return new Set(availableClubs);
     return new Set([...clubFilter].filter((c) => availableClubs.includes(c)));
   }, [clubFilter, availableClubs]);
+
+  const applyBag = useCallback((next: ClubConfig[]) => {
+    setBag(next);
+    saveBag(next);
+    setBagState(next);
+  }, []);
 
   const setClubs = useCallback((next: Set<string>) => {
     saveClubFilter(next);
@@ -131,6 +176,7 @@ export default function App() {
   );
 
   const stats = useMemo(() => clubStats(scoped, goodOnly), [scoped, goodOnly]);
+  const fatigue = useMemo(() => fatigueCurve(scoped), [scoped]);
   const gaps = useMemo(() => gapping(stats), [stats]);
   const trends = useMemo(() => sessionTrends(scoped), [scoped]);
   const metric = useMemo(
@@ -240,7 +286,7 @@ export default function App() {
       {!!shots.length && (
         <>
           <nav className="tabs">
-            {(['overview', 'clubs', 'gapping', 'dispersion', 'curve', 'shots'] as Tab[]).map(
+            {(['overview', 'clubs', 'gapping', 'dispersion', 'curve', 'fatigue', 'shots', 'bag'] as Tab[]).map(
               (t) => (
                 <button
                   key={t}
@@ -321,6 +367,12 @@ export default function App() {
                   color: { legend: true, type: 'categorical' },
                   marks: [
                     metric.zeroLine ? Plot.ruleY([0], { stroke: '#666' }) : Plot.ruleY([]),
+                    // One dotted rule per session, so gaps in practice are visible
+                    // rather than implied by uneven point spacing.
+                    Plot.ruleX(
+                      trends.map((t) => new Date(t.date)),
+                      { stroke: '#39414f', strokeDasharray: '2 4' },
+                    ),
                     // One series per selected club. Points with too few shots
                     // that session are dropped rather than drawn as noise.
                     ...[...selectedClubs]
@@ -489,6 +541,13 @@ export default function App() {
                   </tbody>
                 </table>
               </div>
+              {modelInfo && (
+                <p className="note">
+                  Expected-carry model fitted on {modelInfo.n} well-struck shots,
+                  R² {modelInfo.r2.toFixed(2)}. It powers the strike-quality metric and
+                  the third mishit rule.
+                </p>
+              )}
               <p className="note">
                 * Club speed is estimated, not measured. “vs loft” is launch angle minus
                 static loft and is <strong>always strongly negative for irons</strong> —
@@ -785,6 +844,90 @@ export default function App() {
           )}
         </>
       )}
+
+          {selectedClubs.size > 0 && tab === 'fatigue' && (
+            <section>
+              <h2>Session fatigue</h2>
+              <p className="note">
+                Shot quality against position within the session, pooled across all
+                sessions. Answers a question none of the other views do: how long is a
+                session actually productive? Binned by shots hit rather than minutes,
+                because balls are what tire you.
+              </p>
+              <Chart
+                deps={[fatigue]}
+                options={{
+                  height: 300,
+                  marginLeft: 55,
+                  x: { label: 'Shot number within session', domain: fatigue.map((b) => b.label) },
+                  y: { label: 'Mishit rate', percent: true, domain: [0, 100], grid: true },
+                  marks: [
+                    Plot.ruleY([0]),
+                    Plot.barY(fatigue, {
+                      x: 'label',
+                      y: 'mishitRate',
+                      fill: '#f0803c',
+                      fillOpacity: 0.75,
+                      title: (d: any) => `${d.label}\n${d.shots} shots\n${pct(d.mishitRate)} mishit`,
+                    }),
+                  ],
+                }}
+              />
+              <Chart
+                deps={[fatigue]}
+                options={{
+                  height: 260,
+                  marginLeft: 55,
+                  x: { label: 'Shot number within session', domain: fatigue.map((b) => b.label) },
+                  y: { label: 'Median ball speed, clean strikes (mph)', grid: true },
+                  marks: [
+                    Plot.line(fatigue.filter((b) => b.ballMphMedian != null), {
+                      x: 'label', y: 'ballMphMedian', stroke: '#4c9be8', strokeWidth: 2,
+                    }),
+                    Plot.dot(fatigue.filter((b) => b.ballMphMedian != null), {
+                      x: 'label', y: 'ballMphMedian', fill: '#4c9be8', r: 4,
+                      title: (d: any) => `${d.label}\n${fmt(d.ballMphMedian)} mph\n${d.shots} shots`,
+                    }),
+                  ],
+                }}
+              />
+              <div className="scroll">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Shots</th><th>n</th><th>Mishit</th><th>Ball speed</th><th>Strike quality</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {fatigue.map((b) => (
+                      <tr key={b.label}>
+                        <td>{b.label}</td>
+                        <td className="num">{b.shots}</td>
+                        <td className="num">{pct(b.mishitRate)}</td>
+                        <td className="num">{fmt(b.ballMphMedian)}</td>
+                        <td className="num">{pct(b.carryEfficiencyMedian)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <p className="note">
+                Strike quality is median carry as a fraction of what the launch
+                conditions should have produced. Later bins pool fewer sessions —
+                not every session runs to 60 shots — so read the tail with the n
+                column in view.
+              </p>
+            </section>
+          )}
+
+          {tab === 'bag' && (
+            <BagEditor
+              bag={bag}
+              onChange={applyBag}
+              onReset={() => { const d = resetBag(); saveBag(d); setBagState(d); }}
+              seenClubIds={new Set(shots.map((s) => s.club).filter((c): c is string => !!c))}
+            />
+          )}
 
       <footer>
         <button

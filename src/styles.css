@@ -128,3 +128,21 @@ footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid var(--line);
 td.better { color: #4ec38a; }
 td.worse  { color: var(--bad); }
 td.muted-cell { color: var(--muted); font-size: 13px; }
+
+/* bag editor */
+input, select {
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--line); border-radius: 6px;
+  padding: 5px 8px; font: inherit; font-size: 13px; min-height: 32px;
+}
+input:focus, select:focus { outline: none; border-color: var(--accent); }
+input.narrow { width: 70px; text-align: right; }
+input.wide { min-width: 180px; }
+td code { color: var(--accent); font-size: 12px; }
+.tag {
+  display: inline-block; margin-left: 6px; padding: 1px 6px;
+  background: var(--line); color: var(--muted);
+  border-radius: 4px; font-size: 10px; text-transform: uppercase;
+}
+tr.unused td { opacity: 0.6; }
+.bag-actions { display: flex; gap: 8px; margin: 12px 0; flex-wrap: wrap; }

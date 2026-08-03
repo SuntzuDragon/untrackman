@@ -188,9 +188,25 @@ project reads direction from the pro-ball view throughout.
 src/
   api/       device-flow auth, GraphQL transport, queries, types
   db/        Dexie schema + idempotent sync
-  metrics/   units, club config, per-shot derivations, aggregation
-  ui/        login, chart wrapper
+  metrics/   units, bag config, ballistics, per-shot derivations, aggregation
+  ui/        login, chart wrapper, club filter, bag editor
 ```
+
+Views: **Overview** (per-club trends with a dated regression fit), **Clubs**,
+**Gapping**, **Dispersion** (bay-corrected, with covariance ellipses),
+**Curve**, **Fatigue** (quality vs. position within a session), **Shots**, and
+**Bag** (editable club config).
+
+### Expected carry
+
+`metrics/ballistics.ts` fits a quadratic in ball speed, launch angle and spin to
+the player's own well-struck shots, then scores every shot against it. This is
+what catches strikes that produced normal speed at a normal angle but did not
+fly — a real example from this data is a 6-iron at 98 mph that carried 40 yards
+and which the speed-and-launch rules graded clean.
+
+The model is fitted per dataset rather than hardcoded, so it needs no drag or
+lift constants and self-calibrates to the ball and altitude in play.
 
 Sync is idempotent — strokes are keyed on the API's own `dbId`, and sessions
 whose stroke count already matches are skipped.
