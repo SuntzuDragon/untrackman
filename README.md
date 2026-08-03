@@ -1,8 +1,7 @@
 # untrackman
 
-[![CI](https://github.com/SuntzuDragon/untrackman/actions/workflows/ci.yml/badge.svg)](https://github.com/SuntzuDragon/untrackman/actions/workflows/ci.yml)
-[![deploy](https://img.shields.io/github/checks-status/SuntzuDragon/untrackman/main?label=deploy)](https://github.com/SuntzuDragon/untrackman/commits/main)
-[![live](https://img.shields.io/badge/live-golf.imcb.dev-f38020?logo=cloudflare&logoColor=white)](https://golf.imcb.dev)
+[![CI](https://github.com/SuntzuDragon/untrackman/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/SuntzuDragon/untrackman/actions/workflows/ci.yml)
+[![live](https://img.shields.io/website?url=https%3A%2F%2Fgolf.imcb.dev&label=golf.imcb.dev&up_message=live&down_message=down&logo=cloudflare&logoColor=white&color=f38020)](https://golf.imcb.dev)
 
 Your Trackman Range shot data, extracted and analysed across sessions.
 
