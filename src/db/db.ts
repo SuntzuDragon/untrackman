@@ -16,6 +16,7 @@ export interface SessionRow {
   time: string;
   location: string | null;
   strokeCount: number | null;
+  isHidden: boolean;
   /** When we last pulled strokes for this session. */
   syncedAt: number | null;
 }

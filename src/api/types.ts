@@ -114,6 +114,12 @@ export interface RangeActivity {
   id: string;
   time: string;
   numberOfStrokes: number | null;
+  /**
+   * Hidden sessions are excluded unless the query passes includeHidden: true.
+   * Captured so the UI can show that a session was hidden rather than pretending
+   * it is like any other.
+   */
+  isHidden: boolean | null;
   location: { name: string | null } | null;
 }
 

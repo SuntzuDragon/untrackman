@@ -77,6 +77,7 @@ export async function sync(
       time: a.time,
       location: a.location?.name ?? null,
       strokeCount: a.numberOfStrokes ?? strokes.length,
+      isHidden: a.isHidden ?? false,
       syncedAt: Date.now(),
     };
 

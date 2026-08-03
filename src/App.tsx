@@ -9,7 +9,7 @@ import { toShot, referenceSpeeds, loftBaselines, type Shot } from './metrics/sho
 import { computeBayOffsets, makeCleanStrikePredicate, type BayOffset } from './metrics/bays';
 import {
   clubStats, gapping, sessionTrends, dispersionEllipse, toCsv,
-  TREND_METRICS, MIN_SHOTS_FOR_TREND, trendDelta,
+  TREND_METRICS, MIN_SHOTS_FOR_TREND, trendFit,
 } from './metrics/stats';
 import { ClubFilter, loadClubFilter, saveClubFilter } from './ui/ClubFilter';
 import { CLUBS, MISSING_SLOTS, clubLabel, clubOrder } from './metrics/clubs';
@@ -32,6 +32,14 @@ export default function App() {
   const [bayCorrect, setBayCorrect] = useState(true);
   const [bays, setBays] = useState<BayOffset[]>([]);
   const [clubFilter, setClubFilter] = useState<Set<string> | null>(() => loadClubFilter());
+  /**
+   * Hidden sessions are excluded by default. Trackman lets you hide a session,
+   * and people hide them for good reasons — this account's hidden session was
+   * hit with the wrong club selected, so its labels are wrong and folding it in
+   * corrupts every per-club number. Synced regardless so it stays available.
+   */
+  const [showHidden, setShowHidden] = useState(false);
+  const [hiddenIds, setHiddenIds] = useState<Set<string>>(new Set());
   const [metricKey, setMetricKey] = useState(TREND_METRICS[0].key);
 
   const reload = useCallback(async () => {
@@ -40,6 +48,7 @@ export default function App() {
       db.sessions.toArray(),
     ]);
     const sessionTime = new Map(sessions.map((s) => [s.id, s.time]));
+    setHiddenIds(new Set(sessions.filter((s) => s.isHidden).map((s) => s.id)));
     const raws: RangeStroke[] = strokeRows.map((r) => r.raw);
     const refs = referenceSpeeds(raws);
     // Each bay has its own uncalibrated zero line — up to 19 deg apart.
@@ -75,23 +84,29 @@ export default function App() {
   );
 
   /** Clubs actually present in the data, in bag order. */
+  const sessionScoped = useMemo(
+    () => shots.filter((s) => showHidden || !hiddenIds.has(s.sessionId)),
+    [shots, showHidden, hiddenIds],
+  );
+
   const availableClubs = useMemo(() => {
-    const seen = new Set(shots.map((s) => s.club).filter((c): c is string => !!c));
+    const seen = new Set(sessionScoped.map((s) => s.club).filter((c): c is string => !!c));
     return CLUBS.map((c) => c.trackmanId).filter((c) => seen.has(c));
-  }, [shots]);
+  }, [sessionScoped]);
 
   const shotCounts = useMemo(() => {
     const m = new Map<string, number>();
-    for (const s of shots) if (s.club) m.set(s.club, (m.get(s.club) ?? 0) + 1);
+    for (const s of sessionScoped) if (s.club) m.set(s.club, (m.get(s.club) ?? 0) + 1);
     return m;
-  }, [shots]);
+  }, [sessionScoped]);
 
   // Default to every club once the data lands; respect a stored selection but
   // drop clubs that are no longer present.
+  // An empty selection is legitimate — the user asked for it — so don't refill
+  // it. Only fall back to "everything" when nothing has been chosen yet.
   const selectedClubs = useMemo(() => {
     if (!clubFilter) return new Set(availableClubs);
-    const valid = new Set([...clubFilter].filter((c) => availableClubs.includes(c)));
-    return valid.size ? valid : new Set(availableClubs);
+    return new Set([...clubFilter].filter((c) => availableClubs.includes(c)));
   }, [clubFilter, availableClubs]);
 
   const setClubs = useCallback((next: Set<string>) => {
@@ -99,10 +114,20 @@ export default function App() {
     setClubFilter(next);
   }, []);
 
-  /** Everything below derives from the club-scoped set. */
+  /** Everything below derives from the club- and session-scoped set. */
   const scoped = useMemo(
-    () => shots.filter((s) => s.club && selectedClubs.has(s.club)),
-    [shots, selectedClubs],
+    () =>
+      shots.filter(
+        (s) =>
+          s.club &&
+          selectedClubs.has(s.club) &&
+          (showHidden || !hiddenIds.has(s.sessionId)),
+      ),
+    [shots, selectedClubs, showHidden, hiddenIds],
+  );
+  const hiddenShotCount = useMemo(
+    () => shots.filter((s) => hiddenIds.has(s.sessionId)).length,
+    [shots, hiddenIds],
   );
 
   const stats = useMemo(() => clubStats(scoped, goodOnly), [scoped, goodOnly]);
@@ -153,6 +178,16 @@ export default function App() {
             />
             Bay-corrected
           </label>
+          {hiddenShotCount > 0 && (
+            <label className="toggle" title="Sessions you hid in the TrackMan app">
+              <input
+                type="checkbox"
+                checked={showHidden}
+                onChange={(e) => setShowHidden(e.target.checked)}
+              />
+              Hidden sessions
+            </label>
+          )}
           <button onClick={() => runSync(false)} disabled={!!progress}>
             {progress ? 'Syncing…' : 'Sync'}
           </button>
@@ -218,6 +253,15 @@ export default function App() {
             )}
           </nav>
 
+          {hiddenShotCount > 0 && !showHidden && (
+            <p className="note">
+              {hiddenShotCount} shots from {hiddenIds.size} hidden session
+              {hiddenIds.size === 1 ? '' : 's'} are excluded. Sessions hidden in the
+              TrackMan app usually have something wrong with them — mislabelled clubs
+              being the common one — so they are left out unless you ask for them.
+            </p>
+          )}
+
           <ClubFilter
             available={availableClubs}
             selected={selectedClubs}
@@ -225,7 +269,16 @@ export default function App() {
             counts={shotCounts}
           />
 
-          {tab === 'overview' && (
+          {selectedClubs.size === 0 && (
+            <div className="empty">
+              <p>No clubs selected.</p>
+              <button className="primary" onClick={() => setClubs(new Set(availableClubs))}>
+                Show all clubs
+              </button>
+            </div>
+          )}
+
+          {selectedClubs.size > 0 && tab === 'overview' && (
             <section>
               <div className="cards">
                 <Card label="Sessions" value={String(trends.length)} />
@@ -299,6 +352,29 @@ export default function App() {
                           }),
                         ];
                       }),
+                    // Fitted trendlines, only when few enough clubs are shown
+                    // that six overlapping dashed lines would not be soup.
+                    ...(selectedClubs.size <= 3
+                      ? [...selectedClubs].flatMap((club) => {
+                          const f = trendFit(trends, club, metric);
+                          if (!f || f.r2 < 0.3) return [];
+                          return [
+                            Plot.line(
+                              [
+                                { d: new Date(f.from.date), v: f.from.value },
+                                { d: new Date(f.to.date), v: f.to.value },
+                              ],
+                              {
+                                x: 'd', y: 'v',
+                                stroke: () => clubLabel(club),
+                                strokeWidth: 1.5,
+                                strokeDasharray: '5 4',
+                                strokeOpacity: 0.7,
+                              },
+                            ),
+                          ];
+                        })
+                      : []),
                   ],
                 }}
               />
@@ -311,46 +387,60 @@ export default function App() {
                   : ''}
               </p>
 
-              <h2>Change since your first session</h2>
+              <h2>Trend</h2>
+              <p className="note">
+                Least-squares slope against actual dates, so uneven gaps between
+                sessions are handled properly. R² says how much of the movement the
+                line actually explains — below 0.30 the slope is not distinguishable
+                from noise, however steep it looks.
+              </p>
               <div className="scroll">
                 <table>
                   <thead>
                     <tr>
-                      <th>Club</th><th>Sessions</th><th>First</th><th>Latest</th><th>Change</th>
+                      <th>Club</th><th>Sessions</th><th>Per week</th><th>R²</th><th>Read</th>
                     </tr>
                   </thead>
                   <tbody>
                     {[...selectedClubs]
                       .sort((a, b) => clubOrder(a) - clubOrder(b))
                       .map((club) => {
-                        const d = trendDelta(trends, club, metric);
-                        if (!d) {
+                        const f = trendFit(trends, club, metric);
+                        if (!f) {
                           return (
                             <tr key={club}>
                               <td>{clubLabel(club)}</td>
                               <td className="num">—</td>
-                              <td className="num" colSpan={3}>
-                                not enough sessions with {MIN_SHOTS_FOR_TREND}+ shots
+                              <td colSpan={3} className="muted-cell">
+                                needs 3+ sessions with {MIN_SHOTS_FOR_TREND}+ shots
                               </td>
                             </tr>
                           );
                         }
-                        const better = metric.lowerIsBetter ? d.delta < 0 : d.delta > 0;
-                        const flat = Math.abs(d.delta) < 1e-9;
-                        const show = (v: number) => (metric.percent ? pct(v) : fmt(v));
+                        const solid = f.r2 >= 0.3;
+                        const better = metric.lowerIsBetter
+                          ? f.slopePerWeek < 0
+                          : f.slopePerWeek > 0;
+                        const neutral = !metric.lowerIsBetter && !metric.percent &&
+                          (metric.key === 'curveMean' || metric.key === 'launchMean');
+                        const cls = !solid || neutral ? '' : better ? 'better' : 'worse';
+                        const slope = metric.percent
+                          ? `${f.slopePerWeek > 0 ? '+' : ''}${(f.slopePerWeek * 100).toFixed(1)} pts`
+                          : `${f.slopePerWeek > 0 ? '+' : ''}${fmt(f.slopePerWeek)}`;
                         return (
                           <tr key={club}>
                             <td>{clubLabel(club)}</td>
-                            <td className="num">{d.sessions}</td>
-                            <td className="num">{show(d.first)}</td>
-                            <td className="num">{show(d.last)}</td>
-                            <td
-                              className={`num ${flat ? '' : better ? 'better' : 'worse'}`}
-                            >
-                              {d.delta > 0 ? '+' : ''}
-                              {metric.percent
-                                ? `${(d.delta * 100).toFixed(0)} pts`
-                                : fmt(d.delta)}
+                            <td className="num">{f.n}</td>
+                            <td className={`num ${cls}`}>{slope}</td>
+                            <td className="num">{f.r2.toFixed(2)}</td>
+                            <td className="muted-cell">
+                              {!solid
+                                ? 'too noisy to call'
+                                : neutral
+                                  ? 'no better direction'
+                                  : better
+                                    ? 'improving'
+                                    : 'getting worse'}
                             </td>
                           </tr>
                         );
@@ -358,15 +448,10 @@ export default function App() {
                   </tbody>
                 </table>
               </div>
-              <p className="note">
-                Green is improvement for this metric. Carry and ball speed improving
-                means going up; mishit rate and offline mean going down. Curve and
-                launch have no inherently better direction, so they stay neutral.
-              </p>
             </section>
           )}
 
-          {tab === 'clubs' && (
+          {selectedClubs.size > 0 && tab === 'clubs' && (
             <section>
               <h2>Per-club</h2>
               <p className="note">
@@ -453,7 +538,7 @@ export default function App() {
             </section>
           )}
 
-          {tab === 'gapping' && (
+          {selectedClubs.size > 0 && tab === 'gapping' && (
             <section>
               <h2>Gapping</h2>
               <div className="scroll">
@@ -508,7 +593,7 @@ export default function App() {
             </section>
           )}
 
-          {tab === 'dispersion' && (
+          {selectedClubs.size > 0 && tab === 'dispersion' && (
             <section>
               <h2>Dispersion</h2>
               <p className="note">
@@ -605,7 +690,7 @@ export default function App() {
             </section>
           )}
 
-          {tab === 'curve' && (
+          {selectedClubs.size > 0 && tab === 'curve' && (
             <section>
               <h2>Curvature</h2>
               <p className="note">
@@ -658,7 +743,7 @@ export default function App() {
             </section>
           )}
 
-          {tab === 'shots' && (
+          {selectedClubs.size > 0 && tab === 'shots' && (
             <section>
               <h2>Shots ({visible.length})</h2>
               <div className="scroll">

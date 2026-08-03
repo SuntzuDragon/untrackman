@@ -321,23 +321,73 @@ export const TREND_METRICS: TrendMetric[] = [
 ];
 
 /**
- * Change in a metric between the first and last session with enough data.
- * Returns null when fewer than two usable sessions exist.
+ * Least-squares fit of a metric against time for one club.
+ *
+ * Regressed on actual dates rather than session index: sessions are unevenly
+ * spaced (this account has gaps of 1 day and of 15), and treating them as
+ * equidistant would distort the slope.
+ *
+ * Slope is reported per week because that is the cadence practice happens on.
+ * `r2` matters as much as the slope here — with 6-8 points a steep line through
+ * scattered data means very little, and the UI should say so.
  */
-export function trendDelta(
+export interface TrendFit {
+  /** Change in the metric per week. */
+  slopePerWeek: number;
+  /** 0-1. Below ~0.3 the slope is not distinguishable from noise. */
+  r2: number;
+  /** Sessions that met the minimum-shots bar. */
+  n: number;
+  /** Fitted value at the first and last session, for drawing the line. */
+  from: { date: string; value: number };
+  to: { date: string; value: number };
+}
+
+const DAY = 86_400_000;
+
+export function trendFit(
   trends: SessionTrend[],
   club: string,
   metric: TrendMetric,
-): { first: number; last: number; delta: number; sessions: number } | null {
-  const pts = trends
-    .map((t) => t.byClub[club])
-    .filter((c): c is ClubSessionStats => !!c && c.shots >= MIN_SHOTS_FOR_TREND)
-    .map((c) => metric.get(c))
-    .filter((v): v is number => v != null);
-  if (pts.length < 2) return null;
-  const first = pts[0];
-  const last = pts[pts.length - 1];
-  return { first, last, delta: last - first, sessions: pts.length };
+): TrendFit | null {
+  const pts: { t: number; v: number; date: string }[] = [];
+  for (const t of trends) {
+    const c = t.byClub[club];
+    if (!c || c.shots < MIN_SHOTS_FOR_TREND) continue;
+    const v = metric.get(c);
+    if (v == null) continue;
+    pts.push({ t: new Date(t.date).getTime(), v, date: t.date });
+  }
+  if (pts.length < 3) return null;
+
+  const t0 = pts[0].t;
+  const xs = pts.map((p) => (p.t - t0) / DAY);
+  const ys = pts.map((p) => p.v);
+  const n = pts.length;
+  const mx = xs.reduce((a, b) => a + b, 0) / n;
+  const my = ys.reduce((a, b) => a + b, 0) / n;
+
+  let sxy = 0, sxx = 0, syy = 0;
+  for (let i = 0; i < n; i++) {
+    sxy += (xs[i] - mx) * (ys[i] - my);
+    sxx += (xs[i] - mx) ** 2;
+    syy += (ys[i] - my) ** 2;
+  }
+  // All sessions on the same day, or a perfectly flat metric.
+  if (sxx === 0) return null;
+
+  const slopePerDay = sxy / sxx;
+  const intercept = my - slopePerDay * mx;
+  const r2 = syy === 0 ? 1 : (sxy * sxy) / (sxx * syy);
+
+  const lastX = xs[xs.length - 1];
+  return {
+    slopePerWeek: slopePerDay * 7,
+    r2,
+    n,
+    from: { date: pts[0].date, value: intercept },
+    to: { date: pts[n - 1].date, value: intercept + slopePerDay * lastX },
+  };
 }
 
 /**

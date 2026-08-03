@@ -22,7 +22,16 @@ const MEASUREMENT_FIELDS = `
 /**
  * Range sessions only.
  *
- * IMPORTANT: outdoor Trackman Range sessions are RANGE_PRACTICE, *not*
+ * IMPORTANT: `includeHidden: true` is required. Without it the API silently
+ * omits hidden sessions — this account had one (2026-06-17, 38 strokes) that
+ * never appeared, and because it was the EARLIEST session its absence skewed
+ * every since-first-session comparison. There is no indication in the response
+ * that anything was withheld.
+ *
+ * `timeFrom` / `timeTo` also exist but are not needed: with includeHidden and
+ * no date bounds the API returns the account's full history.
+ *
+ * Outdoor Trackman Range sessions are RANGE_PRACTICE, *not*
  * VIRTUAL_RANGE. VIRTUAL_RANGE is the indoor simulator feature and returns an
  * empty set for a range-only account — which looks exactly like "the API
  * doesn't expose range data". Verified in Phase 0: 7/7 sessions were
@@ -31,7 +40,7 @@ const MEASUREMENT_FIELDS = `
 export const ACTIVITIES = `
   query RangeActivities($take: Int!, $skip: Int!) {
     me {
-      activities(take: $take, skip: $skip, kinds: [RANGE_PRACTICE]) {
+      activities(take: $take, skip: $skip, kinds: [RANGE_PRACTICE], includeHidden: true) {
         totalCount
         pageInfo { hasNextPage }
         items {
@@ -40,6 +49,7 @@ export const ACTIVITIES = `
             id
             time
             numberOfStrokes
+            isHidden
             location { name }
           }
         }

@@ -127,3 +127,4 @@ footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid var(--line);
 
 td.better { color: #4ec38a; }
 td.worse  { color: var(--bad); }
+td.muted-cell { color: var(--muted); font-size: 13px; }

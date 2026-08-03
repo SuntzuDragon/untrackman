@@ -42,8 +42,6 @@ export function ClubFilter({
     const next = new Set(selected);
     if (next.has(club)) next.delete(club);
     else next.add(club);
-    // Never allow an empty selection — an empty dashboard looks like a bug.
-    if (next.size === 0) return;
     onChange(next);
   };
 
@@ -71,11 +69,13 @@ export function ClubFilter({
           <span className="chip-count">{counts.get(c) ?? 0}</span>
         </button>
       ))}
-      {!allOn && (
-        <button className="chip ghost-chip" onClick={() => onChange(new Set(available))}>
-          reset
-        </button>
-      )}
+      <button
+        className={`chip ${selected.size === 0 ? 'active' : ''}`}
+        onClick={() => onChange(new Set())}
+        title="Deselect every club"
+      >
+        None
+      </button>
     </div>
   );
 }
