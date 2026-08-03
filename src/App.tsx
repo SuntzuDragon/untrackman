@@ -7,8 +7,12 @@ import { db, clearAll } from './db/db';
 import { sync, type SyncProgress } from './db/sync';
 import { toShot, referenceSpeeds, loftBaselines, type Shot } from './metrics/shot';
 import { computeBayOffsets, makeCleanStrikePredicate, type BayOffset } from './metrics/bays';
-import { clubStats, gapping, sessionTrends, dispersionEllipse, toCsv } from './metrics/stats';
-import { CLUBS, MISSING_SLOTS, clubLabel } from './metrics/clubs';
+import {
+  clubStats, gapping, sessionTrends, dispersionEllipse, toCsv,
+  TREND_METRICS, MIN_SHOTS_FOR_TREND, trendDelta,
+} from './metrics/stats';
+import { ClubFilter, loadClubFilter, saveClubFilter } from './ui/ClubFilter';
+import { CLUBS, MISSING_SLOTS, clubLabel, clubOrder } from './metrics/clubs';
 import type { RangeStroke } from './api/types';
 
 type Tab = 'overview' | 'clubs' | 'gapping' | 'dispersion' | 'curve' | 'shots';
@@ -27,6 +31,8 @@ export default function App() {
   const [goodOnly, setGoodOnly] = useState(true);
   const [bayCorrect, setBayCorrect] = useState(true);
   const [bays, setBays] = useState<BayOffset[]>([]);
+  const [clubFilter, setClubFilter] = useState<Set<string> | null>(() => loadClubFilter());
+  const [metricKey, setMetricKey] = useState(TREND_METRICS[0].key);
 
   const reload = useCallback(async () => {
     const [strokeRows, sessions] = await Promise.all([
@@ -68,12 +74,47 @@ export default function App() {
     [reload],
   );
 
-  const stats = useMemo(() => clubStats(shots, goodOnly), [shots, goodOnly]);
+  /** Clubs actually present in the data, in bag order. */
+  const availableClubs = useMemo(() => {
+    const seen = new Set(shots.map((s) => s.club).filter((c): c is string => !!c));
+    return CLUBS.map((c) => c.trackmanId).filter((c) => seen.has(c));
+  }, [shots]);
+
+  const shotCounts = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const s of shots) if (s.club) m.set(s.club, (m.get(s.club) ?? 0) + 1);
+    return m;
+  }, [shots]);
+
+  // Default to every club once the data lands; respect a stored selection but
+  // drop clubs that are no longer present.
+  const selectedClubs = useMemo(() => {
+    if (!clubFilter) return new Set(availableClubs);
+    const valid = new Set([...clubFilter].filter((c) => availableClubs.includes(c)));
+    return valid.size ? valid : new Set(availableClubs);
+  }, [clubFilter, availableClubs]);
+
+  const setClubs = useCallback((next: Set<string>) => {
+    saveClubFilter(next);
+    setClubFilter(next);
+  }, []);
+
+  /** Everything below derives from the club-scoped set. */
+  const scoped = useMemo(
+    () => shots.filter((s) => s.club && selectedClubs.has(s.club)),
+    [shots, selectedClubs],
+  );
+
+  const stats = useMemo(() => clubStats(scoped, goodOnly), [scoped, goodOnly]);
   const gaps = useMemo(() => gapping(stats), [stats]);
-  const trends = useMemo(() => sessionTrends(shots), [shots]);
+  const trends = useMemo(() => sessionTrends(scoped), [scoped]);
+  const metric = useMemo(
+    () => TREND_METRICS.find((m) => m.key === metricKey) ?? TREND_METRICS[0],
+    [metricKey],
+  );
   const visible = useMemo(
-    () => (goodOnly ? shots.filter((s) => s.quality === 'good') : shots),
-    [shots, goodOnly],
+    () => (goodOnly ? scoped.filter((s) => s.quality === 'good') : scoped),
+    [scoped, goodOnly],
   );
   /** Lateral position to plot: bay-corrected unless the user opts out. */
   const sideOf = useCallback(
@@ -88,7 +129,8 @@ export default function App() {
   if (!signedIn) return <Login onSignedIn={() => setSignedIn(true)} />;
 
   const overallMishit =
-    shots.length ? shots.filter((s) => s.quality === 'mishit').length / shots.length : null;
+    scoped.length ? scoped.filter((s) => s.quality === 'mishit').length / scoped.length : null;
+  const filtered = selectedClubs.size < availableClubs.length;
 
   return (
     <div className="app">
@@ -176,82 +218,151 @@ export default function App() {
             )}
           </nav>
 
+          <ClubFilter
+            available={availableClubs}
+            selected={selectedClubs}
+            onChange={setClubs}
+            counts={shotCounts}
+          />
+
           {tab === 'overview' && (
             <section>
               <div className="cards">
                 <Card label="Sessions" value={String(trends.length)} />
-                <Card label="Shots" value={String(shots.length)} />
                 <Card
-                  label="Mishit rate"
-                  value={pct(overallMishit)}
-                  hint="across all shots"
+                  label="Shots"
+                  value={String(scoped.length)}
+                  hint={filtered ? `of ${shots.length} total` : undefined}
                 />
+                <Card label="Mishit rate" value={pct(overallMishit)} />
                 <Card
                   label="Clean strikes"
-                  value={String(shots.filter((s) => s.quality === 'good').length)}
+                  value={String(scoped.filter((s) => s.quality === 'good').length)}
                 />
               </div>
 
-              <h2>Mishit rate by session</h2>
-              <p className="note">
-                The most actionable trend in this dataset. Strike consistency moves
-                week to week in a way carry distance does not.
-              </p>
-              <Chart
-                deps={[trends]}
-                options={{
-                  height: 260,
-                  marginLeft: 50,
-                  x: { type: 'utc', label: 'Session' },
-                  y: { label: 'Mishit rate', percent: true, domain: [0, 100], grid: true },
-                  marks: [
-                    Plot.ruleY([0]),
-                    Plot.line(trends, {
-                      x: (d) => new Date(d.date),
-                      y: (d) => d.mishitRate,
-                      stroke: '#f0803c',
-                      strokeWidth: 2,
-                    }),
-                    Plot.dot(trends, {
-                      x: (d) => new Date(d.date),
-                      y: (d) => d.mishitRate,
-                      fill: '#f0803c',
-                      r: 4,
-                      title: (d) =>
-                        `${new Date(d.date).toLocaleDateString()}\n${d.shots} shots\n${pct(d.mishitRate)} mishit`,
-                    }),
-                  ],
-                }}
-              />
+              <h2>{metric.label} over time</h2>
+              <div className="metric-switch">
+                {TREND_METRICS.map((m) => (
+                  <button
+                    key={m.key}
+                    className={`chip ${m.key === metricKey ? 'active' : ''}`}
+                    onClick={() => setMetricKey(m.key)}
+                  >
+                    {m.label}
+                  </button>
+                ))}
+              </div>
 
-              <h2>Median carry by session</h2>
               <Chart
-                deps={[trends, goodOnly]}
+                deps={[trends, metric, selectedClubs]}
                 options={{
-                  height: 320,
-                  marginLeft: 50,
+                  height: 340,
+                  marginLeft: 55,
                   x: { type: 'utc', label: 'Session' },
-                  y: { label: 'Carry (yd)', grid: true },
+                  y: {
+                    label: metric.axisLabel,
+                    grid: true,
+                    ...(metric.percent ? { percent: true, domain: [0, 100] } : {}),
+                  },
                   color: { legend: true, type: 'categorical' },
                   marks: [
-                    Plot.ruleY([0]),
-                    ...CLUBS.filter((c) =>
-                      trends.some((t) => t.carryMedianByClub[c.trackmanId] != null),
-                    ).map((c) =>
-                      Plot.line(
-                        trends.filter((t) => t.carryMedianByClub[c.trackmanId] != null),
-                        {
-                          x: (d) => new Date(d.date),
-                          y: (d) => d.carryMedianByClub[c.trackmanId],
-                          stroke: () => c.label,
-                          strokeWidth: 2,
-                          marker: 'circle',
-                        },
-                      ),
-                    ),
+                    metric.zeroLine ? Plot.ruleY([0], { stroke: '#666' }) : Plot.ruleY([]),
+                    // One series per selected club. Points with too few shots
+                    // that session are dropped rather than drawn as noise.
+                    ...[...selectedClubs]
+                      .sort((a, b) => clubOrder(a) - clubOrder(b))
+                      .flatMap((club) => {
+                        const pts = trends
+                          .map((t) => ({ t, c: t.byClub[club] }))
+                          .filter(
+                            (r) => r.c && r.c.shots >= MIN_SHOTS_FOR_TREND &&
+                              metric.get(r.c) != null,
+                          )
+                          .map((r) => ({
+                            date: new Date(r.t.date),
+                            value: metric.get(r.c!)!,
+                            club: clubLabel(club),
+                            shots: r.c!.shots,
+                          }));
+                        if (pts.length < 2) return [];
+                        return [
+                          Plot.line(pts, {
+                            x: 'date', y: 'value', stroke: 'club', strokeWidth: 2,
+                          }),
+                          Plot.dot(pts, {
+                            x: 'date', y: 'value', fill: 'club', r: 4,
+                            title: (d: any) =>
+                              `${d.club}\n${metric.label}: ${
+                                metric.percent ? pct(d.value) : fmt(d.value)
+                              }\n${d.shots} shots`,
+                          }),
+                        ];
+                      }),
                   ],
                 }}
               />
+              <p className="note">
+                Sessions where a club saw fewer than {MIN_SHOTS_FOR_TREND} shots are
+                omitted — at that sample size the number moves in big steps for
+                reasons that have nothing to do with your swing.
+                {metric.key === 'mishitRate'
+                  ? ' Mishit rate is over all shots; every other metric uses clean strikes only.'
+                  : ''}
+              </p>
+
+              <h2>Change since your first session</h2>
+              <div className="scroll">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Club</th><th>Sessions</th><th>First</th><th>Latest</th><th>Change</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {[...selectedClubs]
+                      .sort((a, b) => clubOrder(a) - clubOrder(b))
+                      .map((club) => {
+                        const d = trendDelta(trends, club, metric);
+                        if (!d) {
+                          return (
+                            <tr key={club}>
+                              <td>{clubLabel(club)}</td>
+                              <td className="num">—</td>
+                              <td className="num" colSpan={3}>
+                                not enough sessions with {MIN_SHOTS_FOR_TREND}+ shots
+                              </td>
+                            </tr>
+                          );
+                        }
+                        const better = metric.lowerIsBetter ? d.delta < 0 : d.delta > 0;
+                        const flat = Math.abs(d.delta) < 1e-9;
+                        const show = (v: number) => (metric.percent ? pct(v) : fmt(v));
+                        return (
+                          <tr key={club}>
+                            <td>{clubLabel(club)}</td>
+                            <td className="num">{d.sessions}</td>
+                            <td className="num">{show(d.first)}</td>
+                            <td className="num">{show(d.last)}</td>
+                            <td
+                              className={`num ${flat ? '' : better ? 'better' : 'worse'}`}
+                            >
+                              {d.delta > 0 ? '+' : ''}
+                              {metric.percent
+                                ? `${(d.delta * 100).toFixed(0)} pts`
+                                : fmt(d.delta)}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                  </tbody>
+                </table>
+              </div>
+              <p className="note">
+                Green is improvement for this metric. Carry and ball speed improving
+                means going up; mishit rate and offline mean going down. Curve and
+                launch have no inherently better direction, so they stay neutral.
+              </p>
             </section>
           )}
 

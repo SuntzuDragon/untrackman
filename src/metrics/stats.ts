@@ -182,14 +182,54 @@ export function gapping(stats: ClubStats[]): GapRow[] {
   return rows;
 }
 
+/** Per-club numbers within a single session. */
+export interface ClubSessionStats {
+  shots: number;
+  clean: number;
+  mishitRate: number | null;
+  carryMedian: number | null;
+  ballMphMedian: number | null;
+  curveMean: number | null;
+  offlineMean: number | null;
+  launchMean: number | null;
+}
+
 export interface SessionTrend {
   sessionId: string;
   date: string;
   shots: number;
   mishitRate: number | null;
-  carryMedianByClub: Record<string, number | null>;
-  curveMeanByClub: Record<string, number | null>;
   ballMphMean: number | null;
+  byClub: Record<string, ClubSessionStats>;
+}
+
+/**
+ * Minimum shots with a club in one session before its per-club trend point is
+ * worth plotting.
+ *
+ * With ~5 shots the rate jumps in 20-point steps, which reads as a dramatic
+ * swing that is really just sampling. Series below this are suppressed rather
+ * than drawn misleadingly.
+ */
+export const MIN_SHOTS_FOR_TREND = 5;
+
+function clubSession(pool: Shot[]): ClubSessionStats {
+  const good = pool.filter((s) => s.quality === 'good');
+  const mishits = pool.filter((s) => s.quality === 'mishit');
+  const carries = nums(good, 'carryYd').sort((a, b) => a - b);
+  const speeds = nums(good, 'ballMph').sort((a, b) => a - b);
+  return {
+    shots: pool.length,
+    clean: good.length,
+    // Mishit rate is over ALL shots — that is the point of it.
+    mishitRate: pool.length ? mishits.length / pool.length : null,
+    // Everything else is over clean strikes only.
+    carryMedian: quantile(carries, 0.5),
+    ballMphMedian: quantile(speeds, 0.5),
+    curveMean: mean(nums(good, 'curveFt')),
+    offlineMean: mean(nums(good, 'offlineFt')),
+    launchMean: mean(nums(good, 'launchAngle')),
+  };
 }
 
 /**
@@ -205,29 +245,99 @@ export function sessionTrends(shots: Shot[]): SessionTrend[] {
 
   const rows: SessionTrend[] = [];
   for (const [sessionId, all] of bySession) {
-    const good = all.filter((s) => s.quality === 'good');
     const mishits = all.filter((s) => s.quality === 'mishit');
-
-    const carryMedianByClub: Record<string, number | null> = {};
-    const curveMeanByClub: Record<string, number | null> = {};
+    const byClub: Record<string, ClubSessionStats> = {};
     for (const c of CLUBS) {
-      const pool = good.filter((s) => s.club === c.trackmanId);
-      const carries = nums(pool, 'carryYd').sort((a, b) => a - b);
-      carryMedianByClub[c.trackmanId] = quantile(carries, 0.5);
-      curveMeanByClub[c.trackmanId] = mean(nums(pool, 'curveFt'));
+      const pool = all.filter((s) => s.club === c.trackmanId);
+      if (pool.length) byClub[c.trackmanId] = clubSession(pool);
     }
-
     rows.push({
       sessionId,
       date: all[0]?.time ?? '',
       shots: all.length,
       mishitRate: all.length ? mishits.length / all.length : null,
-      carryMedianByClub,
-      curveMeanByClub,
-      ballMphMean: mean(nums(good, 'ballMph')),
+      ballMphMean: mean(nums(all.filter((s) => s.quality === 'good'), 'ballMph')),
+      byClub,
     });
   }
   return rows.sort((a, b) => a.date.localeCompare(b.date));
+}
+
+/** Metrics the trend chart can plot, keyed by what the UI shows. */
+export interface TrendMetric {
+  key: string;
+  label: string;
+  axisLabel: string;
+  get: (c: ClubSessionStats) => number | null;
+  /** Rendered as a percentage axis. */
+  percent?: boolean;
+  /** Down is improvement — used to colour the session-over-session delta. */
+  lowerIsBetter?: boolean;
+  /** Draw a zero rule (curve, offline). */
+  zeroLine?: boolean;
+}
+
+export const TREND_METRICS: TrendMetric[] = [
+  {
+    key: 'mishitRate',
+    label: 'Mishit rate',
+    axisLabel: 'Mishit rate',
+    get: (c) => c.mishitRate,
+    percent: true,
+    lowerIsBetter: true,
+  },
+  {
+    key: 'carryMedian',
+    label: 'Median carry',
+    axisLabel: 'Carry (yd)',
+    get: (c) => c.carryMedian,
+  },
+  {
+    key: 'ballMphMedian',
+    label: 'Ball speed',
+    axisLabel: 'Ball speed (mph)',
+    get: (c) => c.ballMphMedian,
+  },
+  {
+    key: 'curveMean',
+    label: 'Mean curve',
+    axisLabel: 'Curve (ft) — left \u2190 0 \u2192 right',
+    get: (c) => c.curveMean,
+    zeroLine: true,
+  },
+  {
+    key: 'offlineMean',
+    label: 'Mean offline',
+    axisLabel: 'Offline (ft)',
+    get: (c) => c.offlineMean,
+    lowerIsBetter: true,
+  },
+  {
+    key: 'launchMean',
+    label: 'Launch angle',
+    axisLabel: 'Launch (\u00b0)',
+    get: (c) => c.launchMean,
+  },
+];
+
+/**
+ * Change in a metric between the first and last session with enough data.
+ * Returns null when fewer than two usable sessions exist.
+ */
+export function trendDelta(
+  trends: SessionTrend[],
+  club: string,
+  metric: TrendMetric,
+): { first: number; last: number; delta: number; sessions: number } | null {
+  const pts = trends
+    .map((t) => t.byClub[club])
+    .filter((c): c is ClubSessionStats => !!c && c.shots >= MIN_SHOTS_FOR_TREND)
+    .map((c) => metric.get(c))
+    .filter((v): v is number => v != null);
+  if (pts.length < 2) return null;
+  const first = pts[0];
+  const last = pts[pts.length - 1];
+  return { first, last, delta: last - first, sessions: pts.length };
 }
 
 /**

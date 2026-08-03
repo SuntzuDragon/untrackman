@@ -104,3 +104,26 @@ footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid var(--line);
   header h1 { font-size: 18px; }
   .card-value { font-size: 22px; }
 }
+
+/* club filter + metric switcher */
+.club-filter, .metric-switch {
+  display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 14px;
+}
+.metric-switch { margin: 6px 0 12px; }
+.chip {
+  background: var(--panel); border: 1px solid var(--line); color: var(--muted);
+  border-radius: 999px; padding: 5px 12px; font-size: 13px; min-height: 34px;
+  display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+}
+.chip:hover { border-color: var(--accent); color: var(--text); }
+.chip.active {
+  background: var(--accent); border-color: var(--accent);
+  color: #06121f; font-weight: 600;
+}
+.chip-count {
+  font-size: 11px; opacity: 0.65; font-variant-numeric: tabular-nums;
+}
+.chip.ghost-chip { border-style: dashed; }
+
+td.better { color: #4ec38a; }
+td.worse  { color: var(--bad); }
