@@ -196,8 +196,39 @@ export function clubConfig(trackmanId: string | null): ClubConfig | undefined {
   return trackmanId ? byId.get(trackmanId) : undefined;
 }
 
+/** "6Iron" -> "6 Iron", "PitchingWedge" -> "Pitching Wedge". */
+export function prettifyClubId(id: string): string {
+  return id.replace(/([a-z0-9])([A-Z])/g, '$1 $2');
+}
+
 export function clubLabel(trackmanId: string | null): string {
-  return clubConfig(trackmanId)?.label ?? trackmanId ?? 'Unknown';
+  const cfg = clubConfig(trackmanId);
+  if (cfg) return cfg.label;
+  return trackmanId ? prettifyClubId(trackmanId) : 'Unknown';
+}
+
+/** True when Trackman reported this club but the bag has no entry for it. */
+export function isUnbagged(trackmanId: string | null): boolean {
+  return !!trackmanId && !clubConfig(trackmanId);
+}
+
+/**
+ * Every club present in the data, bag-ordered, with unconfigured clubs last.
+ *
+ * Deriving this from the bag alone silently drops shots hit with a club the bag
+ * has never heard of — removing the 6-iron from a bag made 118 shots vanish
+ * from every view with no warning. The data is the source of truth for WHICH
+ * clubs exist; the bag only supplies metadata about them.
+ */
+export function orderClubsFromData(seenIds: Iterable<string>): string[] {
+  const seen = [...new Set(seenIds)];
+  const known = getBag()
+    .map((c) => c.trackmanId)
+    .filter((id) => seen.includes(id));
+  const unknown = seen
+    .filter((id) => !known.includes(id))
+    .sort((a, b) => prettifyClubId(a).localeCompare(prettifyClubId(b)));
+  return [...known, ...unknown];
 }
 
 export function clubOrder(trackmanId: string | null): number {

@@ -10,6 +10,9 @@ import { describe, expect, it } from 'vitest';
 import fixtures from './__fixtures__/validation-shots.json';
 import { toShot, referenceSpeeds, curvature, mergeMeasurement } from './shot';
 import { offsetKey } from './bays';
+import {
+  DEFAULT_BAG, setBag, orderClubsFromData, clubLabel, isUnbagged,
+} from './clubs';
 import type { RangeStroke } from '../api/types';
 
 const strokes = fixtures as unknown as RangeStroke[];
@@ -186,5 +189,57 @@ describe('bay alignment correction', () => {
     expect(toShot(matching, 's', refs, offsets).bayOffsetDeg).toBe(16);
     // Same bay, different target -> the offset must NOT be reused.
     expect(toShot(differentTarget, 's', refs, offsets).bayOffsetDeg).toBeNull();
+  });
+});
+
+describe('clubs the bag has never heard of', () => {
+  /**
+   * Regression: availableClubs was derived from the bag and intersected with the
+   * data, so a club Trackman reported but the bag lacked was dropped from every
+   * view. Removing the 6-iron from the bag made 118 shots vanish silently and
+   * shifted the overall mishit rate from 47% to 50%.
+   *
+   * The data decides WHICH clubs exist; the bag only supplies metadata.
+   */
+  it('keeps unconfigured clubs in the ordered list', () => {
+    setBag(DEFAULT_BAG.filter((c) => c.trackmanId !== '6Iron'));
+    const ordered = orderClubsFromData(['Driver', '6Iron', '4Iron']);
+    expect(ordered).toContain('6Iron');
+    setBag(DEFAULT_BAG);
+  });
+
+  it('puts unconfigured clubs after bagged ones', () => {
+    setBag(DEFAULT_BAG.filter((c) => c.trackmanId !== '6Iron'));
+    const ordered = orderClubsFromData(['6Iron', 'Driver', '4Iron']);
+    expect(ordered.indexOf('Driver')).toBeLessThan(ordered.indexOf('6Iron'));
+    expect(ordered[ordered.length - 1]).toBe('6Iron');
+    setBag(DEFAULT_BAG);
+  });
+
+  it('never invents or drops a club', () => {
+    setBag(DEFAULT_BAG.filter((c) => c.trackmanId !== '6Iron'));
+    const seen = ['Driver', '6Iron', '4Iron', '7Wood'];
+    expect(new Set(orderClubsFromData(seen))).toEqual(new Set(seen));
+    setBag(DEFAULT_BAG);
+  });
+
+  it('labels an unbagged club readably rather than as a raw id', () => {
+    setBag(DEFAULT_BAG.filter((c) => c.trackmanId !== '6Iron'));
+    expect(clubLabel('6Iron')).toBe('6 Iron');
+    expect(clubLabel('PitchingWedge')).toBe('Pitching Wedge');
+    expect(isUnbagged('6Iron')).toBe(true);
+    expect(isUnbagged('Driver')).toBe(false);
+    setBag(DEFAULT_BAG);
+  });
+
+  it('still produces a usable shot for an unbagged club', () => {
+    setBag(DEFAULT_BAG.filter((c) => c.trackmanId !== '6Iron'));
+    const s = toShot(strokes.find((x) => x.club === '6Iron')!, 'sess', refs);
+    // Measurements survive; only bag-derived fields go null.
+    expect(s.carryYd).not.toBeNull();
+    expect(s.ballMph).not.toBeNull();
+    expect(s.loftDelta).toBeNull();
+    expect(s.estClubMph).toBeNull();
+    setBag(DEFAULT_BAG);
   });
 });

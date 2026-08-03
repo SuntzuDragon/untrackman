@@ -146,3 +146,7 @@ td code { color: var(--accent); font-size: 12px; }
 }
 tr.unused td { opacity: 0.6; }
 .bag-actions { display: flex; gap: 8px; margin: 12px 0; flex-wrap: wrap; }
+button.linkish {
+  background: none; border: none; color: var(--accent);
+  padding: 0; min-height: 0; text-decoration: underline; font-size: inherit;
+}

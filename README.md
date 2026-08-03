@@ -169,6 +169,22 @@ Two consequences:
 `curve` needs no correction — it is measured off the launch line, so applying
 one would double-count. There is a test asserting this.
 
+### The data decides which clubs exist, not the bag
+
+Deriving the club list from the configured bag and intersecting it with the data
+silently drops shots hit with anything unconfigured. Removing the 6-iron from the
+bag made 118 shots vanish from every view — no warning, no "unknown" bucket — and
+shifted the headline mishit rate by three points.
+
+`orderClubsFromData()` inverts that: the data supplies the club list, the bag only
+supplies metadata (loft, smash factor, ordering). Unconfigured clubs appear
+everywhere, are labelled readably, and are flagged in the UI. There are
+regression tests for it.
+
+This was the third instance of the same failure mode in this project, after the
+`VIRTUAL_RANGE` filter and the missing `includeHidden`. When something here
+narrows a dataset, it should say so out loud.
+
 ### `isValidMeasurement` is useless
 
 `false` on all 412 strokes. Despite the name it is not a quality signal. Don't

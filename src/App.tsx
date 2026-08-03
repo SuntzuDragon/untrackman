@@ -13,7 +13,8 @@ import {
 } from './metrics/stats';
 import { ClubFilter, loadClubFilter, saveClubFilter } from './ui/ClubFilter';
 import {
-  MISSING_SLOTS, clubLabel, clubOrder, getBag, setBag, loadBag, saveBag, resetBag,
+  MISSING_SLOTS, clubLabel, clubOrder, setBag, loadBag, saveBag, resetBag,
+  orderClubsFromData, isUnbagged,
   type ClubConfig,
 } from './metrics/clubs';
 import { BagEditor } from './ui/BagEditor';
@@ -128,10 +129,20 @@ export default function App() {
     [shots, showHidden, hiddenIds],
   );
 
-  const availableClubs = useMemo(() => {
-    const seen = new Set(sessionScoped.map((s) => s.club).filter((c): c is string => !!c));
-    return getBag().map((c) => c.trackmanId).filter((c) => seen.has(c));
-  }, [sessionScoped]);
+  // Driven by the DATA, not the bag — a club Trackman reports but the bag has
+  // no entry for must still appear, or its shots disappear silently.
+  const availableClubs = useMemo(
+    () =>
+      orderClubsFromData(
+        sessionScoped.map((s) => s.club).filter((c): c is string => !!c),
+      ),
+    [sessionScoped, bag],
+  );
+
+  const unbaggedClubs = useMemo(
+    () => availableClubs.filter((c) => isUnbagged(c)),
+    [availableClubs, bag],
+  );
 
   const shotCounts = useMemo(() => {
     const m = new Map<string, number>();
@@ -298,6 +309,16 @@ export default function App() {
               ),
             )}
           </nav>
+
+          {unbaggedClubs.length > 0 && (
+            <p className="callout">
+              Trackman reported {unbaggedClubs.length === 1 ? 'a club' : 'clubs'} your bag
+              has no entry for: <strong>{unbaggedClubs.map(clubLabel).join(', ')}</strong>.
+              Their shots are included everywhere, but without a loft or smash factor the
+              launch-vs-loft and estimated-club-speed figures are blank for them.{' '}
+              <button className="linkish" onClick={() => setTab('bag')}>Add to bag</button>
+            </p>
+          )}
 
           {hiddenShotCount > 0 && !showHidden && (
             <p className="note">
