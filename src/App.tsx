@@ -18,6 +18,7 @@ import {
   type ClubConfig,
 } from './metrics/clubs';
 import { BagEditor } from './ui/BagEditor';
+import { axisBounds } from './metrics/scale';
 import { fitCarryModel } from './metrics/ballistics';
 import type { RangeStroke } from './api/types';
 
@@ -208,6 +209,146 @@ export default function App() {
     [bayCorrect],
   );
 
+  /** Least-squares fit per club, shared by the trend chart and the table. */
+  const fits = useMemo(
+    () =>
+      [...selectedClubs]
+        .sort((a, b) => clubOrder(a) - clubOrder(b))
+        .map((club) => ({ club, fit: trendFit(trends, club, metric) })),
+    [selectedClubs, trends, metric],
+  );
+
+  /**
+   * The points the trend chart actually draws. Computed up here rather than
+   * inline in the spec because the y-domain has to be derived from the same
+   * set — the axis should fit what is drawn, not what exists.
+   */
+  const trendSeries = useMemo(
+    () =>
+      [...selectedClubs]
+        .sort((a, b) => clubOrder(a) - clubOrder(b))
+        .map((club) => ({
+          club,
+          pts: trends
+            .map((t) => ({ t, c: t.byClub[club] }))
+            .filter(
+              (r) => r.c && r.c.shots >= MIN_SHOTS_FOR_TREND && metric.get(r.c) != null,
+            )
+            .map((r) => ({
+              date: new Date(r.t.date),
+              value: metric.get(r.c!)!,
+              club: clubLabel(club),
+              shots: r.c!.shots,
+            })),
+        }))
+        // A single point is a dot with no line — not a trend.
+        .filter((s) => s.pts.length >= 2),
+    [selectedClubs, trends, metric],
+  );
+
+  /**
+   * Fitted trendlines are only drawn when few enough clubs are shown that six
+   * overlapping dashed lines would not be soup.
+   */
+  const drawnFits = useMemo(
+    () =>
+      selectedClubs.size <= 3
+        ? fits.filter((f): f is { club: string; fit: NonNullable<typeof f.fit> } =>
+            f.fit != null && f.fit.r2 >= 0.3)
+        : [],
+    [fits, selectedClubs],
+  );
+
+  /**
+   * Percent scales render fractions as 0-100, so the domain is in those units
+   * while the data stays fractional.
+   */
+  const trendDomain = useMemo(() => {
+    const k = metric.percent ? 100 : 1;
+    return axisBounds(
+      [
+        ...trendSeries.flatMap((s) => s.pts.map((p) => p.value * k)),
+        ...drawnFits.flatMap(({ fit }) => [fit.from.value * k, fit.to.value * k]),
+      ],
+      {
+        pad: 0.08,
+        include: metric.zeroLine ? [0] : undefined,
+        max: metric.percent ? 100 : undefined,
+      },
+    );
+  }, [trendSeries, drawnFits, metric]);
+
+  /**
+   * Launch vs loft: the identity reference used to be a fixed 20-45 line, which
+   * dragged the axes out to cover degrees no club in the bag has. Both axes now
+   * follow the clubs, and the reference spans whatever they both cover.
+   */
+  /**
+   * Both axes share one domain, because the whole chart is a comparison of two
+   * angles: launch against the loft on the sole. Scaling them independently
+   * puts the launch = loft reference off the panel within a few degrees —
+   * irons launch well below their static loft — and a reference line you
+   * cannot see is not a reference. The empty upper-left triangle is the point
+   * being made, not wasted space.
+   */
+  const loftScale = useMemo(() => {
+    const pts = stats.filter((s) => s.loft != null && s.launchMean != null);
+    return (
+      axisBounds([...pts.map((s) => s.loft), ...pts.map((s) => s.launchMean)]) ??
+      [20, 45]
+    );
+  }, [stats]);
+
+  const carryRangeDomain = useMemo(
+    () =>
+      axisBounds(
+        stats.flatMap((s) => [s.carryP25, s.carryMedian, s.carryP75, s.carryMax]),
+        // The P25-P75 bar is a 10px round-capped rule, so its ends overhang the
+        // values it is drawn from.
+        { pad: 0.05 },
+      ),
+    [stats],
+  );
+
+  const dispersionDomain = useMemo(() => {
+    const pts = visible.filter((s) => sideOf(s) != null && s.carryYd != null);
+    const xs: (number | null)[] = pts.map((s) => sideOf(s)! / 3);
+    const ys: (number | null)[] = pts.map((s) => s.carryYd!);
+    // The 2σ rings reach past the outermost shots, so fold them in as well.
+    for (const e of clubEllipses(visible, sideOf, 2)) {
+      for (const p of e.pts) {
+        xs.push(p.x);
+        ys.push(p.y);
+      }
+    }
+    return {
+      // 0 is the target line — the chart is unreadable without it in frame.
+      x: axisBounds(xs, { pad: 0.05, include: [0], min: -Infinity }),
+      y: axisBounds(ys, { pad: 0.05 }),
+    };
+  }, [visible, sideOf]);
+
+  const curveDomain = useMemo(
+    () =>
+      axisBounds(
+        visible.map((s) => s.curveFt),
+        { pad: 0.05, include: [0], min: -Infinity },
+      ),
+    [visible],
+  );
+
+  const fatigueDomain = useMemo(
+    () => ({
+      // Bars have to start at zero, so only the top is data-driven.
+      mishit: axisBounds(
+        fatigue.map((b) => (b.mishitRate == null ? null : b.mishitRate * 100)),
+        { include: [0], padMin: 0, padMax: 0.12, min: 0, max: 100 },
+      ),
+      ballMph: axisBounds(fatigue.map((b) => b.ballMphMedian), { pad: 0.1 }),
+    }),
+    [fatigue],
+  );
+
   if (!signedIn) return <Login onSignedIn={() => setSignedIn(true)} />;
 
   const overallMishit =
@@ -375,15 +516,17 @@ export default function App() {
               </div>
 
               <Chart
-                deps={[trends, metric, selectedClubs]}
+                deps={[trendSeries, drawnFits, trendDomain, metric]}
                 options={{
                   height: 340,
                   marginLeft: 55,
-                  x: { type: 'utc', label: 'Session' },
+                  // Insets keep the first and last session's dots off the frame.
+                  x: { type: 'utc', label: 'Session', inset: 14 },
                   y: {
                     label: metric.axisLabel,
                     grid: true,
-                    ...(metric.percent ? { percent: true, domain: [0, 100] } : {}),
+                    ...(metric.percent ? { percent: true } : {}),
+                    ...(trendDomain ? { domain: trendDomain } : {}),
                   },
                   color: { legend: true, type: 'categorical' },
                   marks: [
@@ -396,58 +539,33 @@ export default function App() {
                     ),
                     // One series per selected club. Points with too few shots
                     // that session are dropped rather than drawn as noise.
-                    ...[...selectedClubs]
-                      .sort((a, b) => clubOrder(a) - clubOrder(b))
-                      .flatMap((club) => {
-                        const pts = trends
-                          .map((t) => ({ t, c: t.byClub[club] }))
-                          .filter(
-                            (r) => r.c && r.c.shots >= MIN_SHOTS_FOR_TREND &&
-                              metric.get(r.c) != null,
-                          )
-                          .map((r) => ({
-                            date: new Date(r.t.date),
-                            value: metric.get(r.c!)!,
-                            club: clubLabel(club),
-                            shots: r.c!.shots,
-                          }));
-                        if (pts.length < 2) return [];
-                        return [
-                          Plot.line(pts, {
-                            x: 'date', y: 'value', stroke: 'club', strokeWidth: 2,
-                          }),
-                          Plot.dot(pts, {
-                            x: 'date', y: 'value', fill: 'club', r: 4,
-                            title: (d: any) =>
-                              `${d.club}\n${metric.label}: ${
-                                metric.percent ? pct(d.value) : fmt(d.value)
-                              }\n${d.shots} shots`,
-                          }),
-                        ];
+                    ...trendSeries.flatMap(({ pts }) => [
+                      Plot.line(pts, {
+                        x: 'date', y: 'value', stroke: 'club', strokeWidth: 2,
                       }),
-                    // Fitted trendlines, only when few enough clubs are shown
-                    // that six overlapping dashed lines would not be soup.
-                    ...(selectedClubs.size <= 3
-                      ? [...selectedClubs].flatMap((club) => {
-                          const f = trendFit(trends, club, metric);
-                          if (!f || f.r2 < 0.3) return [];
-                          return [
-                            Plot.line(
-                              [
-                                { d: new Date(f.from.date), v: f.from.value },
-                                { d: new Date(f.to.date), v: f.to.value },
-                              ],
-                              {
-                                x: 'd', y: 'v',
-                                stroke: () => clubLabel(club),
-                                strokeWidth: 1.5,
-                                strokeDasharray: '5 4',
-                                strokeOpacity: 0.7,
-                              },
-                            ),
-                          ];
-                        })
-                      : []),
+                      Plot.dot(pts, {
+                        x: 'date', y: 'value', fill: 'club', r: 4,
+                        title: (d: any) =>
+                          `${d.club}\n${metric.label}: ${
+                            metric.percent ? pct(d.value) : fmt(d.value)
+                          }\n${d.shots} shots`,
+                      }),
+                    ]),
+                    ...drawnFits.map(({ club, fit }) =>
+                      Plot.line(
+                        [
+                          { d: new Date(fit.from.date), v: fit.from.value },
+                          { d: new Date(fit.to.date), v: fit.to.value },
+                        ],
+                        {
+                          x: 'd', y: 'v',
+                          stroke: () => clubLabel(club),
+                          strokeWidth: 1.5,
+                          strokeDasharray: '5 4',
+                          strokeOpacity: 0.7,
+                        },
+                      ),
+                    ),
                   ],
                 }}
               />
@@ -475,10 +593,8 @@ export default function App() {
                     </tr>
                   </thead>
                   <tbody>
-                    {[...selectedClubs]
-                      .sort((a, b) => clubOrder(a) - clubOrder(b))
-                      .map((club) => {
-                        const f = trendFit(trends, club, metric);
+                    {fits
+                      .map(({ club, fit: f }) => {
                         if (!f) {
                           return (
                             <tr key={club}>
@@ -580,17 +696,20 @@ export default function App() {
 
               <h2>Launch angle vs static loft</h2>
               <Chart
-                deps={[stats]}
+                deps={[loftScale]}
                 options={{
-                  height: 260,
+                  height: 320,
                   marginLeft: 60,
-                  x: { label: 'Static loft (°)' },
-                  y: { label: 'Mean launch angle (°)', grid: true },
+                  x: { label: 'Static loft (°)', domain: loftScale },
+                  y: { label: 'Mean launch angle (°)', grid: true, domain: loftScale },
                   marks: [
+                    // Identity reference, corner to corner over the shared
+                    // domain — rather than a fixed 20-45 that may miss the
+                    // wedges entirely.
                     Plot.line(
                       [
-                        { l: 20, v: 20 },
-                        { l: 45, v: 45 },
+                        { l: loftScale[0], v: loftScale[0] },
+                        { l: loftScale[1], v: loftScale[1] },
                       ],
                       { x: 'l', y: 'v', stroke: '#555', strokeDasharray: '4 4' },
                     ),
@@ -647,11 +766,15 @@ export default function App() {
 
               <h2>Carry range by club</h2>
               <Chart
-                deps={[stats]}
+                deps={[stats, carryRangeDomain]}
                 options={{
                   height: 300,
                   marginLeft: 90,
-                  x: { label: 'Carry (yd)', grid: true },
+                  x: {
+                    label: 'Carry (yd)',
+                    grid: true,
+                    ...(carryRangeDomain ? { domain: carryRangeDomain } : {}),
+                  },
                   y: { label: null, domain: stats.map((s) => s.label) },
                   marks: [
                     Plot.ruleY(stats, {
@@ -683,12 +806,20 @@ export default function App() {
                 Ellipses are 1σ covariance (about 39% of shots) and 2σ (about 86%).
               </p>
               <Chart
-                deps={[visible, bayCorrect]}
+                deps={[visible, bayCorrect, dispersionDomain]}
                 options={{
                   height: 480,
                   marginLeft: 60,
-                  x: { label: 'Left ← carry side (yd) → Right', grid: true },
-                  y: { label: 'Carry (yd)', grid: true },
+                  x: {
+                    label: 'Left ← carry side (yd) → Right',
+                    grid: true,
+                    ...(dispersionDomain.x ? { domain: dispersionDomain.x } : {}),
+                  },
+                  y: {
+                    label: 'Carry (yd)',
+                    grid: true,
+                    ...(dispersionDomain.y ? { domain: dispersionDomain.y } : {}),
+                  },
                   color: { legend: true, type: 'categorical' },
                   marks: [
                     Plot.ruleX([0], { stroke: '#555' }),
@@ -778,11 +909,15 @@ export default function App() {
                 the bay is aimed. Positive = curved right, negative = curved left.
               </p>
               <Chart
-                deps={[visible]}
+                deps={[visible, curveDomain]}
                 options={{
                   height: 320,
                   marginLeft: 90,
-                  x: { label: 'Curve (ft) — left ← 0 → right', grid: true },
+                  x: {
+                    label: 'Curve (ft) — left ← 0 → right',
+                    grid: true,
+                    ...(curveDomain ? { domain: curveDomain } : {}),
+                  },
                   y: { label: null },
                   marks: [
                     Plot.ruleX([0], { stroke: '#888' }),
@@ -876,12 +1011,17 @@ export default function App() {
                 because balls are what tire you.
               </p>
               <Chart
-                deps={[fatigue]}
+                deps={[fatigue, fatigueDomain]}
                 options={{
                   height: 300,
                   marginLeft: 55,
                   x: { label: 'Shot number within session', domain: fatigue.map((b) => b.label) },
-                  y: { label: 'Mishit rate', percent: true, domain: [0, 100], grid: true },
+                  y: {
+                    label: 'Mishit rate',
+                    percent: true,
+                    grid: true,
+                    ...(fatigueDomain.mishit ? { domain: fatigueDomain.mishit } : {}),
+                  },
                   marks: [
                     Plot.ruleY([0]),
                     Plot.barY(fatigue, {
@@ -895,12 +1035,16 @@ export default function App() {
                 }}
               />
               <Chart
-                deps={[fatigue]}
+                deps={[fatigue, fatigueDomain]}
                 options={{
                   height: 260,
                   marginLeft: 55,
                   x: { label: 'Shot number within session', domain: fatigue.map((b) => b.label) },
-                  y: { label: 'Median ball speed, clean strikes (mph)', grid: true },
+                  y: {
+                    label: 'Median ball speed, clean strikes (mph)',
+                    grid: true,
+                    ...(fatigueDomain.ballMph ? { domain: fatigueDomain.ballMph } : {}),
+                  },
                   marks: [
                     Plot.line(fatigue.filter((b) => b.ballMphMedian != null), {
                       x: 'label', y: 'ballMphMedian', stroke: '#4c9be8', strokeWidth: 2,
@@ -985,12 +1129,11 @@ function Card({ label, value, hint }: { label: string; value: string; hint?: str
  * a club whose long misses also go right produces a diagonal ellipse, and that
  * correlation is exactly the thing a plain σ pair hides.
  */
-function ellipseMarks(
+function clubEllipses(
   shots: Shot[],
   sideOf: (s: Shot) => number | null,
   sigma: number,
-  opacity: number,
-) {
+): { club: string; pts: { x: number; y: number }[] }[] {
   const byClub = new Map<string, Shot[]>();
   for (const s of shots) {
     if (!s.club || sideOf(s) == null || s.carryYd == null) continue;
@@ -998,7 +1141,7 @@ function ellipseMarks(
     byClub.get(s.club)!.push(s);
   }
 
-  const marks: ReturnType<typeof Plot.line>[] = [];
+  const out: { club: string; pts: { x: number; y: number }[] }[] = [];
   for (const [club, group] of byClub) {
     const e = dispersionEllipse(
       group.map((s) => ({ ...s, carrySideAdjFt: sideOf(s) })),
@@ -1015,18 +1158,27 @@ function ellipseMarks(
         y: e.cy + px * Math.sin(theta) + py * Math.cos(theta),
       });
     }
-    marks.push(
-      Plot.line(pts, {
-        x: 'x',
-        y: 'y',
-        stroke: () => clubLabel(club),
-        strokeWidth: sigma === 1 ? 2 : 1.25,
-        strokeOpacity: opacity,
-        strokeDasharray: sigma === 1 ? undefined : '3 3',
-      }),
-    );
+    out.push({ club, pts });
   }
-  return marks;
+  return out;
+}
+
+function ellipseMarks(
+  shots: Shot[],
+  sideOf: (s: Shot) => number | null,
+  sigma: number,
+  opacity: number,
+) {
+  return clubEllipses(shots, sideOf, sigma).map(({ club, pts }) =>
+    Plot.line(pts, {
+      x: 'x',
+      y: 'y',
+      stroke: () => clubLabel(club),
+      strokeWidth: sigma === 1 ? 2 : 1.25,
+      strokeOpacity: opacity,
+      strokeDasharray: sigma === 1 ? undefined : '3 3',
+    }),
+  );
 }
 
 /** Centre marker for each club's dispersion — the average miss. */
