@@ -9,7 +9,8 @@ import { toShot, referenceSpeeds, loftBaselines, type Shot } from './metrics/sho
 import { computeBayOffsets, makeCleanStrikePredicate, type BayOffset } from './metrics/bays';
 import {
   clubStats, gapping, sessionTrends, dispersionEllipse, toCsv,
-  TREND_METRICS, MIN_SHOTS_FOR_TREND, trendFit, fatigueCurve,
+  TREND_METRICS, MIN_SHOTS_FOR_TREND, MIN_SHOTS_FOR_ELLIPSE, trendFit,
+  fatigueCurve, BAY_CORRECTED, AS_MEASURED, type Placement,
 } from './metrics/stats';
 import { ClubFilter, loadClubFilter, saveClubFilter } from './ui/ClubFilter';
 import {
@@ -187,7 +188,17 @@ export default function App() {
     [shots, hiddenIds],
   );
 
-  const stats = useMemo(() => clubStats(scoped, goodOnly), [scoped, goodOnly]);
+  /**
+   * How every position-derived number reads a shot: bay-corrected unless the
+   * user opts out. Threaded all the way into clubStats and the ellipses so the
+   * toggle cannot leave the chart and the table below it disagreeing.
+   */
+  const placement = bayCorrect ? BAY_CORRECTED : AS_MEASURED;
+
+  const stats = useMemo(
+    () => clubStats(scoped, goodOnly, placement),
+    [scoped, goodOnly, placement],
+  );
   const fatigue = useMemo(() => fatigueCurve(scoped), [scoped]);
   const gaps = useMemo(() => gapping(stats), [stats]);
   const trends = useMemo(() => sessionTrends(scoped), [scoped]);
@@ -199,11 +210,8 @@ export default function App() {
     () => (goodOnly ? scoped.filter((s) => s.quality === 'good') : scoped),
     [scoped, goodOnly],
   );
-  /** Lateral position to plot: bay-corrected unless the user opts out. */
-  const sideOf = useCallback(
-    (s: Shot) => (bayCorrect ? s.carrySideAdjFt : s.carrySideFt),
-    [bayCorrect],
-  );
+  const sideOf = useCallback((s: Shot) => placement.side(s), [placement]);
+  const fwdOf = useCallback((s: Shot) => placement.forward(s), [placement]);
   const dirOf = useCallback(
     (s: Shot) => (bayCorrect ? s.launchDirectionAdj : s.launchDirection),
     [bayCorrect],
@@ -310,12 +318,37 @@ export default function App() {
     [stats],
   );
 
+  /**
+   * Headline numbers for the bay panel.
+   *
+   * `residualDeg` is the part the correction eats: how far the measured start
+   * line sits from what pure straight-out-of-the-bay geometry predicts. Since
+   * subtracting a group's own median forces that median to zero, this is the
+   * only place a genuine, session-wide directional bias can still be seen —
+   * shot-weighted so a bay with 90 shots counts for more than one with 9.
+   */
+  const baySummary = useMemo(() => {
+    let wsum = 0;
+    let w = 0;
+    for (const b of bays) {
+      if (b.residualDeg == null) continue;
+      wsum += b.residualDeg * b.n;
+      w += b.n;
+    }
+    return {
+      maxOffsetDeg: bays.reduce((a, b) => Math.max(a, Math.abs(b.offsetDeg)), 0),
+      fromGeometry: bays.filter((b) => b.source === 'geometric').length,
+      residualDeg: w ? wsum / w : null,
+      uncorrectedShots: scoped.filter((s) => s.bayOffsetDeg == null).length,
+    };
+  }, [bays, scoped]);
+
   const dispersionDomain = useMemo(() => {
-    const pts = visible.filter((s) => sideOf(s) != null && s.carryYd != null);
+    const pts = visible.filter((s) => sideOf(s) != null && fwdOf(s) != null);
     const xs: (number | null)[] = pts.map((s) => sideOf(s)! / 3);
-    const ys: (number | null)[] = pts.map((s) => s.carryYd!);
+    const ys: (number | null)[] = pts.map((s) => fwdOf(s)!);
     // The 2σ rings reach past the outermost shots, so fold them in as well.
-    for (const e of clubEllipses(visible, sideOf, 2)) {
+    for (const e of clubEllipses(visible, placement, 2)) {
       for (const p of e.pts) {
         xs.push(p.x);
         ys.push(p.y);
@@ -326,7 +359,7 @@ export default function App() {
       x: axisBounds(xs, { pad: 0.05, include: [0], min: -Infinity }),
       y: axisBounds(ys, { pad: 0.05 }),
     };
-  }, [visible, sideOf]);
+  }, [visible, sideOf, fwdOf, placement]);
 
   const curveDomain = useMemo(
     () =>
@@ -801,10 +834,24 @@ export default function App() {
               <h2>Dispersion</h2>
               <p className="note">
                 {bayCorrect
-                  ? 'Lateral position is bay-corrected — each bay\u2019s own aim offset removed.'
-                  : 'Raw lateral position — includes up to 19° of bay aim error.'}{' '}
-                Ellipses are 1σ covariance (about 39% of shots) and 2σ (about 86%).
+                  ? 'Bay-corrected — chart and table alike; each bay\u2019s own aim offset removed.'
+                  : `As measured — includes up to ${fmt(baySummary.maxOffsetDeg, 0)}° of bay aim error.`}{' '}
+                Ellipses are 1σ covariance (about 39% of shots) and 2σ (about 86%),
+                drawn for clubs with at least {MIN_SHOTS_FOR_ELLIPSE} shots.
+                Vertical axis is down-range distance, which is slightly less than
+                carry for a shot that finished offline.
               </p>
+              {bayCorrect && (
+                <p className="note">
+                  <strong>Read centres relative to each other, not to zero.</strong>{' '}
+                  The offset is your own median start line from that bay, so
+                  subtracting it forces the bag average to 0 by construction — any
+                  bias you hold across every club is absorbed into it. A club sitting
+                  right here starts right <em>of your own average</em>, not right of
+                  the target. Your absolute bias is the residual in the bay table
+                  below; shape is on the Curve tab, which this never touches.
+                </p>
+              )}
               <Chart
                 deps={[visible, bayCorrect, dispersionDomain]}
                 options={{
@@ -816,7 +863,7 @@ export default function App() {
                     ...(dispersionDomain.x ? { domain: dispersionDomain.x } : {}),
                   },
                   y: {
-                    label: 'Carry (yd)',
+                    label: 'Down range (yd)',
                     grid: true,
                     ...(dispersionDomain.y ? { domain: dispersionDomain.y } : {}),
                   },
@@ -824,45 +871,50 @@ export default function App() {
                   marks: [
                     Plot.ruleX([0], { stroke: '#555' }),
                     // 2σ then 1σ so the tighter ring draws on top.
-                    ...ellipseMarks(visible, sideOf, 2, 0.25),
-                    ...ellipseMarks(visible, sideOf, 1, 0.6),
+                    ...ellipseMarks(visible, placement, 2, 0.25),
+                    ...ellipseMarks(visible, placement, 1, 0.6),
                     Plot.dot(
-                      visible.filter((s) => sideOf(s) != null && s.carryYd != null),
+                      visible.filter((s) => sideOf(s) != null && fwdOf(s) != null),
                       {
                         x: (d) => sideOf(d)! / 3,
-                        y: 'carryYd',
+                        y: (d) => fwdOf(d)!,
                         stroke: (d) => clubLabel(d.club),
                         r: 2.5,
                         opacity: 0.55,
                         title: (d) =>
-                          `${clubLabel(d.club)}\n${fmt(d.carryYd)} yd\n${fmt(sideOf(d))} ft side\n${d.bayName ?? ''}`,
+                          `${clubLabel(d.club)}\n${fmt(d.carryYd)} yd carry\n${fmt(sideOf(d))} ft side\n${d.bayName ?? ''}`,
                       },
                     ),
-                    ...ellipseCentreMarks(visible, sideOf),
+                    ...ellipseCentreMarks(visible, placement),
                   ],
                 }}
               />
               <div className="scroll">
                 <table>
                   <thead>
-                    <tr><th>Club</th><th>n</th><th>Centre</th><th>Side σ</th><th>Carry σ</th><th>Mean offline</th><th>Dir (adj)</th></tr>
+                    <tr>
+                      <th>Club</th><th>n</th><th>Centre (yd)</th><th>Side σ (yd)</th>
+                      <th>Carry σ (yd)</th><th>Mean offline (ft)</th>
+                      <th title="Median start line relative to your own average from the same bay — not an absolute push or pull">
+                        Start line vs bay avg
+                      </th>
+                    </tr>
                   </thead>
                   <tbody>
                     {stats.map((s) => {
-                      const e = dispersionEllipse(
-                        visible.filter((v) => v.club === s.club),
-                      );
+                      const pool = visible.filter((v) => v.club === s.club);
+                      const e = dispersionEllipse(pool, placement);
                       return (
                         <tr key={s.club}>
                           <td>{s.label}</td>
-                          <td className="num">{e?.n ?? 0}</td>
+                          <td className="num">{pool.length}</td>
                           <td className="num">
-                            {e ? `${fmt(e.cx)} yd ${e.cx >= 0 ? 'R' : 'L'}` : '—'}
+                            {e ? `${fmt(e.cx)} ${e.cx >= 0 ? 'R' : 'L'}` : '—'}
                           </td>
                           <td className="num">{fmt(s.sideStdev == null ? null : s.sideStdev / 3)}</td>
                           <td className="num">{fmt(s.carryStdev)}</td>
-                          <td className="num">{fmt(s.offlineMean)} ft</td>
-                          <td className="num">{fmt(s.launchDirAdjMean)}°</td>
+                          <td className="num">{fmt(s.offlineMean)}</td>
+                          <td className="num">{fmt(s.launchDirAdjMedian)}°</td>
                         </tr>
                       );
                     })}
@@ -875,14 +927,40 @@ export default function App() {
                 Launch direction is reported against the bay→target line, so aiming
                 anywhere else adds a constant offset. Keyed on bay <em>and</em> target —
                 one bay can host several. “Geometric” is the offset predicted from the
-                bay and target coordinates if you hit dead straight out of the bay; it
+                tee and target coordinates if you hit dead straight out of the bay; it
                 tracks the measured value at r = 0.99, which is what confirms this is
-                geometry rather than a swing pattern.
+                geometry rather than a swing pattern. Groups with fewer than 8 clean
+                strikes use that geometric value rather than going uncorrected.
+              </p>
+              <p className="note">
+                <strong>Residual</strong> is measured − geometric: how far your start
+                line sits from straight out of the bay. That is the directional bias
+                the correction removes, and this is the only place it survives —
+                shot-weighted, you start{' '}
+                {baySummary.residualDeg == null ? (
+                  '— (no group has both a measured and a geometric value)'
+                ) : (
+                  <strong>
+                    {fmt(Math.abs(baySummary.residualDeg))}° {baySummary.residualDeg >= 0 ? 'right' : 'left'}
+                  </strong>
+                )}{' '}
+                of the bay axis on average.{' '}
+                <strong>Clubs</strong> is how many clubs fed a measured offset: one
+                number is fitted across all of them, so a group dominated by a single
+                club carries that club’s bias into every other club hit from it.
+                {baySummary.fromGeometry > 0 &&
+                  ` ${baySummary.fromGeometry} group(s) fell back to geometry.`}
+                {baySummary.uncorrectedShots > 0 &&
+                  ` ${baySummary.uncorrectedShots} shot(s) have neither — no bay, target or coordinates — and are plotted as measured.`}
               </p>
               <div className="scroll">
                 <table>
                   <thead>
-                    <tr><th>Bay</th><th>Target</th><th>Shots</th><th>Aim offset</th><th>Geometric</th><th>IQR</th></tr>
+                    <tr>
+                      <th>Bay</th><th>Target</th><th>Shots</th><th>Clubs</th>
+                      <th>Aim offset</th><th>Source</th><th>Geometric</th>
+                      <th>Residual</th><th>± (median)</th><th>IQR</th>
+                    </tr>
                   </thead>
                   <tbody>
                     {bays.map((b) => (
@@ -890,8 +968,12 @@ export default function App() {
                         <td>{b.bay}</td>
                         <td className="flags">{b.targetId?.slice(0, 8) ?? '—'}</td>
                         <td className="num">{b.n}</td>
+                        <td className="num">{b.source === 'measured' ? b.clubs : '—'}</td>
                         <td className="num">{b.offsetDeg > 0 ? '+' : ''}{fmt(b.offsetDeg)}°</td>
-                        <td className="num">{b.geometricDeg == null ? '—' : `${(-b.geometricDeg) > 0 ? '+' : ''}${fmt(-b.geometricDeg)}°`}</td>
+                        <td className="flags">{b.source}</td>
+                        <td className="num">{b.geometricDeg == null ? '—' : `${b.geometricDeg > 0 ? '+' : ''}${fmt(b.geometricDeg)}°`}</td>
+                        <td className="num">{b.residualDeg == null ? '—' : `${b.residualDeg > 0 ? '+' : ''}${fmt(b.residualDeg)}°`}</td>
+                        <td className="num">{b.stderrDeg == null ? '—' : `±${fmt(b.stderrDeg)}°`}</td>
                         <td className="num">{fmt(b.spreadDeg)}°</td>
                       </tr>
                     ))}
@@ -1131,21 +1213,19 @@ function Card({ label, value, hint }: { label: string; value: string; hint?: str
  */
 function clubEllipses(
   shots: Shot[],
-  sideOf: (s: Shot) => number | null,
+  placement: Placement,
   sigma: number,
 ): { club: string; pts: { x: number; y: number }[] }[] {
   const byClub = new Map<string, Shot[]>();
   for (const s of shots) {
-    if (!s.club || sideOf(s) == null || s.carryYd == null) continue;
+    if (!s.club || placement.side(s) == null || placement.forward(s) == null) continue;
     if (!byClub.has(s.club)) byClub.set(s.club, []);
     byClub.get(s.club)!.push(s);
   }
 
   const out: { club: string; pts: { x: number; y: number }[] }[] = [];
   for (const [club, group] of byClub) {
-    const e = dispersionEllipse(
-      group.map((s) => ({ ...s, carrySideAdjFt: sideOf(s) })),
-    );
+    const e = dispersionEllipse(group, placement);
     if (!e) continue;
     const theta = (e.angleDeg * Math.PI) / 180;
     const pts: { x: number; y: number }[] = [];
@@ -1165,11 +1245,11 @@ function clubEllipses(
 
 function ellipseMarks(
   shots: Shot[],
-  sideOf: (s: Shot) => number | null,
+  placement: Placement,
   sigma: number,
   opacity: number,
 ) {
-  return clubEllipses(shots, sideOf, sigma).map(({ club, pts }) =>
+  return clubEllipses(shots, placement, sigma).map(({ club, pts }) =>
     Plot.line(pts, {
       x: 'x',
       y: 'y',
@@ -1182,18 +1262,16 @@ function ellipseMarks(
 }
 
 /** Centre marker for each club's dispersion — the average miss. */
-function ellipseCentreMarks(shots: Shot[], sideOf: (s: Shot) => number | null) {
+function ellipseCentreMarks(shots: Shot[], placement: Placement) {
   const byClub = new Map<string, Shot[]>();
   for (const s of shots) {
-    if (!s.club || sideOf(s) == null || s.carryYd == null) continue;
+    if (!s.club || placement.side(s) == null || placement.forward(s) == null) continue;
     if (!byClub.has(s.club)) byClub.set(s.club, []);
     byClub.get(s.club)!.push(s);
   }
   const centres: { x: number; y: number; club: string }[] = [];
   for (const [club, group] of byClub) {
-    const e = dispersionEllipse(
-      group.map((s) => ({ ...s, carrySideAdjFt: sideOf(s) })),
-    );
+    const e = dispersionEllipse(group, placement);
     if (e) centres.push({ x: e.cx, y: e.cy, club: clubLabel(club) });
   }
   return [

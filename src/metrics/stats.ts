@@ -26,6 +26,39 @@ export function stdev(v: number[]): number | null {
 const nums = (shots: Shot[], key: keyof Shot): number[] =>
   shots.map((s) => s[key]).filter((v): v is number => typeof v === 'number');
 
+const numsBy = (shots: Shot[], get: (s: Shot) => number | null): number[] =>
+  shots.map(get).filter((v): v is number => typeof v === 'number');
+
+export const median = (v: number[]): number | null =>
+  quantile([...v].sort((a, b) => a - b), 0.5);
+
+/**
+ * How a view reads a shot's position on the range.
+ *
+ * Exists so the "Bay-corrected" toggle reaches every number on the dispersion
+ * tab at once. Previously the chart switched to raw while the table below it
+ * silently stayed corrected, because the ellipse and the σ columns read the
+ * adjusted fields directly.
+ *
+ * `side` is feet, positive right. `forward` is the DOWN-RANGE component in
+ * yards, not the radial carry — a dispersion plot's y axis is how far down the
+ * range the ball landed.
+ */
+export interface Placement {
+  side: (s: Shot) => number | null;
+  forward: (s: Shot) => number | null;
+}
+
+export const BAY_CORRECTED: Placement = {
+  side: (s) => s.carrySideAdjFt,
+  forward: (s) => s.carryForwardAdjYd,
+};
+
+export const AS_MEASURED: Placement = {
+  side: (s) => s.carrySideFt,
+  forward: (s) => s.carryForwardYd,
+};
+
 export interface ClubStats {
   club: string;
   label: string;
@@ -43,13 +76,21 @@ export interface ClubStats {
   carryP75: number | null;
   carryMax: number | null;
 
-  /** Bay-corrected lateral position, feet. */
+  /** Lateral position, feet, read through the active Placement. */
   sideMean: number | null;
   sideStdev: number | null;
-  /** Mean absolute offline distance after bay correction, feet. */
+  /** Mean absolute offline distance, feet, read through the active Placement. */
   offlineMean: number | null;
-  /** Mean bay-corrected launch direction — should sit near 0 once corrected. */
-  launchDirAdjMean: number | null;
+  /**
+   * Median start line relative to the bay's fitted offset, degrees.
+   *
+   * NOT an absolute push/pull number, and near zero by construction when
+   * averaged over the bag: the offset IS the median start line of that bay's
+   * shots, so this can only show how a club differs from your own average from
+   * the same bay. Median rather than mean, to match the estimator it is
+   * measured against.
+   */
+  launchDirAdjMedian: number | null;
 
   curveMean: number | null;
   curveMedian: number | null;
@@ -72,7 +113,11 @@ export interface ClubStats {
  * set versus roughly 140 for clean contact. Mishit RATE is reported separately
  * and is computed over all shots regardless.
  */
-export function clubStats(shots: Shot[], goodOnly = true): ClubStats[] {
+export function clubStats(
+  shots: Shot[],
+  goodOnly = true,
+  placement: Placement = BAY_CORRECTED,
+): ClubStats[] {
   const byClub = new Map<string, Shot[]>();
   for (const s of shots) {
     if (!s.club) continue;
@@ -87,8 +132,9 @@ export function clubStats(shots: Shot[], goodOnly = true): ClubStats[] {
     const pool = goodOnly ? good : all;
 
     const carries = nums(pool, 'carryYd').sort((a, b) => a - b);
-    // Bay-corrected: raw carrySide carries up to 17 deg of bay aim error.
-    const sides = nums(pool, 'carrySideAdjFt');
+    // Read through the Placement so these follow the bay-correction toggle:
+    // raw carrySide still carries the full bay aim error.
+    const sides = numsBy(pool, placement.side);
     const curves = nums(pool, 'curveFt').sort((a, b) => a - b);
 
     out.push({
@@ -110,8 +156,8 @@ export function clubStats(shots: Shot[], goodOnly = true): ClubStats[] {
 
       sideMean: mean(sides),
       sideStdev: stdev(sides),
-      offlineMean: mean(nums(pool, 'offlineFt')),
-      launchDirAdjMean: mean(nums(pool, 'launchDirectionAdj')),
+      offlineMean: mean(sides.map(Math.abs)),
+      launchDirAdjMedian: median(nums(pool, 'launchDirectionAdj')),
 
       curveMean: mean(curves),
       curveMedian: quantile(curves, 0.5),
@@ -469,10 +515,23 @@ export function trendFit(
 }
 
 /**
- * Dispersion ellipse: 1-sigma covariance ellipse over (carrySide, carry).
- * Returns centre, semi-axes and rotation for rendering.
+ * Minimum shots before a club's ellipse is drawn.
+ *
+ * Three points always define an ellipse, and it will be drawn with exactly the
+ * same visual weight as one fitted to sixty — which reads as a confident
+ * statement about a club you hit twice. Below this the club still appears in
+ * the table, with its n, and simply gets no ring.
  */
-export function dispersionEllipse(shots: Shot[]): {
+export const MIN_SHOTS_FOR_ELLIPSE = 8;
+
+/**
+ * Dispersion ellipse: 1-sigma covariance ellipse over (side, forward).
+ * Returns centre, semi-axes and rotation for rendering, in yards.
+ */
+export function dispersionEllipse(
+  shots: Shot[],
+  placement: Placement = BAY_CORRECTED,
+): {
   cx: number;
   cy: number;
   rx: number;
@@ -481,9 +540,10 @@ export function dispersionEllipse(shots: Shot[]): {
   n: number;
 } | null {
   const pts = shots
-    .filter((s) => s.carrySideAdjFt != null && s.carryYd != null)
-    .map((s) => [s.carrySideAdjFt! / 3, s.carryYd!] as const); // side ft -> yd
-  if (pts.length < 3) return null;
+    .map((s) => [placement.side(s), placement.forward(s)] as const)
+    .filter((p): p is readonly [number, number] => p[0] != null && p[1] != null)
+    .map(([side, forward]) => [side / 3, forward] as const); // side ft -> yd
+  if (pts.length < MIN_SHOTS_FOR_ELLIPSE) return null;
 
   const cx = mean(pts.map((p) => p[0]))!;
   const cy = mean(pts.map((p) => p[1]))!;
@@ -521,9 +581,11 @@ export function dispersionEllipse(shots: Shot[]): {
 export function toCsv(shots: Shot[]): string {
   const cols: (keyof Shot)[] = [
     'id', 'sessionId', 'time', 'club', 'bayName',
-    'carryYd', 'totalYd', 'carrySideFt', 'ballMph', 'spinRpm', 'spinAxis',
+    'carryYd', 'totalYd', 'carrySideFt', 'carryForwardYd',
+    'ballMph', 'spinRpm', 'spinAxis',
     'launchAngle', 'launchDirection', 'landingAngle', 'peakFt',
-    'launchDirectionAdj', 'carrySideAdjFt', 'bayOffsetDeg', 'offlineFt',
+    'launchDirectionAdj', 'carrySideAdjFt', 'carryForwardAdjYd',
+    'bayOffsetDeg', 'bayOffsetSource', 'offlineFt',
     'curveFt', 'curveDeg', 'estClubMph', 'loftDelta', 'loftDeltaVsOwn',
     'quality', 'qualityReason', 'isRawBall',
   ];

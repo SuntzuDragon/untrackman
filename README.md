@@ -150,12 +150,12 @@ than the selected target — for instance simply hitting straight out of the bay
 every shot picks up a constant offset equal to the angle between your aim and
 that line.
 
-This is geometry, not a swing pattern, and `bayPosition` / `targetPosition` let
+This is geometry, not a swing pattern, and `teePosition` / `targetPosition` let
 you prove it: the angle derived from those coordinates correlates with the
-measured median launch direction at **r = −0.99** across this account's eight
+measured median launch direction at **r = 0.99** across this account's eight
 (bay, target) combinations.
 
-Two consequences:
+Consequences:
 
 - **Key the offset on (bay, target), not bay.** One bay hosts several targets.
   In this data BAY07's two targets differ by 11.8°; collapsing them to one
@@ -164,10 +164,35 @@ Two consequences:
   direction against the pure "hit dead straight out of the bay" prediction gives
   slope 0.71 (r = 0.96) — this player aims about 29% of the way toward the
   selected target without intending to. Raw geometry would over-correct by that
-  same 29%; the median absorbs it.
+  same 29%; the median absorbs it. Treat 0.71 as indicative rather than
+  precise — with eight points and noise in the predictor, regression dilution
+  pulls the slope below 1 on its own.
+- **Fall back to geometry below 8 clean strikes, never to nothing.** A group too
+  small to estimate from used to go uncorrected and then sit in a corrected plot
+  with no indication — a ~60 yard outlier dragging the ellipse centre and
+  inflating σ. Geometry needs no shots and is far closer than no correction.
+- **Correcting is a rotation about the tee.** `carry` is the RADIAL distance and
+  `carrySide` its lateral component (reconstructing curvature under the radial
+  reading matches native `curve` at +3.50 vs +3.33 m; the forward reading gives
+  −0.04). So `side' = carry·sin(finish − offset)` and
+  `forward' = carry·cos(finish − offset)`, leaving carry itself alone. Holding
+  `forward` fixed and taking `forward·tan(finish − offset)` is not a rotation:
+  it shrinks every corrected side by `cos(finish)/cos(finish − offset)`, ~6% at
+  this range's 19° bays and less at shallower ones, which made bays
+  incomparable.
+
+**What the correction deletes.** The offset is the median start line of your own
+clean strikes from that group, so subtracting it forces that median to exactly 0°
+by construction. A directional bias you hold across the whole session cannot
+survive it, and the per-club numbers can only show how a club differs from your
+own average from the same bay. `residualDeg` — measured minus geometric — exists
+so the absorbed part is reported rather than silently discarded. One offset is
+also fitted across every club in a group, so a group dominated by a single club
+carries that club's bias into the others; the bay table shows the club count.
 
 `curve` needs no correction — it is measured off the launch line, so applying
-one would double-count. There is a test asserting this.
+one would double-count. It is the honest absolute read on shape. There is a test
+asserting the correction leaves it alone.
 
 ### The data decides which clubs exist, not the bag
 

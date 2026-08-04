@@ -143,9 +143,13 @@ describe('bay alignment correction', () => {
     bay: 'BAY16',
     targetId: 'tgt-1',
     offsetDeg: 16,
+    source: 'measured' as const,
     n: 50,
     spreadDeg: 8,
-    geometricDeg: -22,
+    stderrDeg: 1.05,
+    geometricDeg: 14,
+    residualDeg: 2,
+    clubs: 4,
   };
   const offsetsFor = (bay: string, targetId: string) =>
     new Map([[offsetKey(bay, targetId), { ...OFFSET, bay, targetId }]]);

@@ -65,6 +65,13 @@ export interface Shot {
   carryYd: number | null;
   totalYd: number | null;
   carrySideFt: number | null;
+  /**
+   * Down-range component of the carry, yards. `carryYd` is the RADIAL distance
+   * to the landing point, so a shot 60 ft offline landed measurably less far
+   * down the range than its carry number says. Dispersion is plotted forward
+   * vs lateral, which is what this is for; distance stats stay on carryYd.
+   */
+  carryForwardYd: number | null;
   ballMph: number | null;
   spinRpm: number | null;
   spinAxis: number | null;
@@ -79,7 +86,11 @@ export interface Shot {
   launchDirectionAdj: number | null;
   /** Carry side with the bay's aim offset removed, feet. Positive = right. */
   carrySideAdjFt: number | null;
+  /** Down-range component after the same rotation, yards. */
+  carryForwardAdjYd: number | null;
   bayOffsetDeg: number | null;
+  /** Where the applied offset came from, or null when none was available. */
+  bayOffsetSource: 'measured' | 'geometric' | null;
   /** Absolute offline distance after correction, feet. */
   offlineFt: number | null;
 
@@ -249,10 +260,12 @@ export function toShot(
       shotIndex: ctx?.shotIndex ?? 0,
       club: stroke.club,
       bayName: stroke.bayName,
-      carryYd: null, totalYd: null, carrySideFt: null, ballMph: null,
+      carryYd: null, totalYd: null, carrySideFt: null, carryForwardYd: null,
+      ballMph: null,
       spinRpm: null, spinAxis: null, launchAngle: null, launchDirection: null,
       landingAngle: null, peakFt: null,
-      launchDirectionAdj: null, carrySideAdjFt: null, bayOffsetDeg: null,
+      launchDirectionAdj: null, carrySideAdjFt: null, carryForwardAdjYd: null,
+      bayOffsetDeg: null, bayOffsetSource: null,
       offlineFt: null,
       curveFt: null, curveDeg: null,
       estClubMph: null, loftDelta: null, loftDeltaVsOwn: null,
@@ -273,6 +286,8 @@ export function toShot(
   const bay = bayOffsets?.get(offsetKey(stroke.bayName, stroke.targetId));
   const adj = applyBayOffset(m, bay?.offsetDeg);
   const carrySideAdjFt = adj.carrySide == null ? null : adj.carrySide * M_TO_FT;
+  // Rotation by zero — the same geometry, so raw and corrected stay comparable.
+  const raw = applyBayOffset(m, undefined);
 
   const loftDelta =
     m.launchAngle != null && cfg?.loft != null ? m.launchAngle - cfg.loft : null;
@@ -290,6 +305,7 @@ export function toShot(
     carryYd: m.carry == null ? null : m.carry * M_TO_YD,
     totalYd: m.total == null ? null : m.total * M_TO_YD,
     carrySideFt: m.carrySide == null ? null : m.carrySide * M_TO_FT,
+    carryForwardYd: raw.carryForward == null ? null : raw.carryForward * M_TO_YD,
     ballMph,
     spinRpm: m.ballSpin,
     spinAxis: m.spinAxis,
@@ -300,7 +316,9 @@ export function toShot(
 
     launchDirectionAdj: adj.launchDirection,
     carrySideAdjFt,
+    carryForwardAdjYd: adj.carryForward == null ? null : adj.carryForward * M_TO_YD,
     bayOffsetDeg: bay?.offsetDeg ?? null,
+    bayOffsetSource: bay?.source ?? null,
     offlineFt: carrySideAdjFt == null ? null : Math.abs(carrySideAdjFt),
 
     curveFt,
