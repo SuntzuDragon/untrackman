@@ -5,7 +5,7 @@
 
 Your Trackman Range shot data, extracted and analysed across sessions.
 
-<img width="1386" height="1046" alt="image" src="https://github.com/user-attachments/assets/142ba157-79ec-4bac-8969-e2430ba4638f" />
+<img width="1374" height="1070" alt="image" src="https://github.com/user-attachments/assets/65f5f861-09b8-49e4-93eb-82e56520480b" />
 
 The TrackMan consumer app has no export, and the web portal walls per-shot detail
 behind a "download the app" message. This pulls it out and charts it over time —
